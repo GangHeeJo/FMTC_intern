@@ -1,0 +1,25 @@
+joy_to_twist:
+  ros__parameters:
+    axis_throttle: 1
+    axis_steer: 0
+    deadzone: 0.15
+    scale_linear: 1.0
+    scale_angular: 1.0
+
+cmd_mux:
+  ros__parameters:
+    toggle_button: 0     # 토글 버튼 번호 (필요시 변경)
+    stop_button: 1       # 비상정지 버튼 번호 (필요시 변경)
+    initial_mode: 0      # 0=MANUAL, 1=AUTO
+    manual_timeout_s: 0.5
+    auto_timeout_s: 0.3
+    switch_stop_s: 0.2
+
+serial_sender:
+  ros__parameters:
+    port: /dev/arduino_mega
+    baud: 115200
+    th_threshold: 0.3
+    st_deadzone: 0.35    # 조향 0 잘 안 잡히면 여기 키우면 됨
+    st_steps: 2
+    timeout_s: 0.3

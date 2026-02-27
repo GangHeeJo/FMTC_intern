@@ -1,0 +1,35 @@
+joy_to_twist:
+  ros__parameters:
+    axis_throttle: 1
+    axis_steer: 0
+    deadzone: 0.15
+    scale_linear: 1.0
+    scale_angular: 1.0
+
+cmd_mux:
+  ros__parameters:
+    toggle_button: 0
+    stop_button: 1
+    initial_mode: 0
+    manual_timeout_s: 0.5
+    auto_timeout_s: 0.3
+    switch_stop_s: 0.2   # 전환 순간 정지
+
+serial_sender:
+  ros__parameters:
+    port: /dev/arduino_mega   # udev 적용 후 이걸 추천
+    baud: 115200
+    th_threshold: 0.3
+    st_deadzone: 0.35
+    st_steps: 2
+    timeout_s: 0.3
+
+cam_lane_auto:
+  ros__parameters:
+    image_topic: /cam_lane/image_raw
+    lane_change_topic: /lane_change_flag
+    show_debug: true
+    auto_speed: 0.7
+    steer_max_deg: 14.0
+    ang_max: 1.0
+    min_lines_to_move: 1

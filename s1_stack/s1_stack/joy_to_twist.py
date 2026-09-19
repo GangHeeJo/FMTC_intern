@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
@@ -28,6 +29,7 @@ class JoyToTwist(Node):
 
         # periodic publish
         self.declare_parameter('publish_rate_hz', 20.0)
+        self.declare_parameter('joy_timeout_s', 0.5)
 
         self.axis_steer = int(self.get_parameter('axis_steer').value)
         self.axis_drive = int(self.get_parameter('axis_drive').value)
@@ -37,6 +39,9 @@ class JoyToTwist(Node):
         self.invert_steer = bool(self.get_parameter('invert_steer').value)
         self.invert_drive = bool(self.get_parameter('invert_drive').value)
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
+
+        self.joy_timeout = float(self.get_parameter('joy_timeout_s').value)
+        self.last_joy_t = None
 
         self.pub = self.create_publisher(Twist, '/cmd_manual', 10)
         self.sub = self.create_subscription(Joy, '/joy', self.on_joy, 10)
@@ -79,14 +84,16 @@ class JoyToTwist(Node):
         self.latest_lin = float(lin)
         self.latest_stn = float(stn)
         self.have_joy = True
+        self.last_joy_t = time.monotonic()
 
     def on_timer(self):
         if not self.have_joy:
             return
 
         cmd = Twist()
-        cmd.linear.x = self.latest_lin
-        cmd.angular.z = self.latest_stn
+        if time.monotonic() - self.last_joy_t < self.joy_timeout:
+            cmd.linear.x = self.latest_lin
+            cmd.angular.z = self.latest_stn
         self.pub.publish(cmd)
 
 

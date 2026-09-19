@@ -44,7 +44,6 @@ def generate_launch_description():
             executable='decision_auto',
             name='decision_auto',
             output='screen',
-            parameters=[params],
         ),
         Node(
             package='sllidar_ros2',

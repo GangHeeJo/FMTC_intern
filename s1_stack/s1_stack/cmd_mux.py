@@ -74,11 +74,11 @@ class CmdMux(Node):
 
         if new_mode is not None and new_mode != self.mode:
             self.pub_cmd.publish(twist_zero())
-            self.hold_until = time.time() + self.switch_stop_s
+            self.hold_until = time.monotonic() + self.switch_stop_s
             
             # [추가] STOP 모드로 진입할 때만 1초 타이머 작동
             if new_mode == MODE_STOP:
-                self.stop_until = time.time() + 1.0
+                self.stop_until = time.monotonic() + 1.0
             
             self.mode = new_mode
             self.publish_mode()
@@ -87,14 +87,14 @@ class CmdMux(Node):
 
     def on_manual(self, msg: Twist):
         self.last_manual = msg
-        self.last_manual_t = time.time()
+        self.last_manual_t = time.monotonic()
 
     def on_auto(self, msg: Twist):
         self.last_auto = msg
-        self.last_auto_t = time.time()
+        self.last_auto_t = time.monotonic()
 
     def on_timer(self):
-        now = time.time()
+        now = time.monotonic()
         
         # STOP 모드 처리
         if self.mode == MODE_STOP:
@@ -103,7 +103,7 @@ class CmdMux(Node):
                 self.pub_cmd.publish(twist_zero())
             else:
                 # 1초가 지나면 아무것도 발행하지 않음 (Topic Silent)
-                # 아두이노는 신호가 끊긴 것을 감지하고 1초 뒤 Failsafe 작동
+                # 아두이노는 신호가 끊긴 것을 감지하고 2초 뒤 Failsafe 작동
                 pass
             return
         
@@ -114,12 +114,16 @@ class CmdMux(Node):
         if self.mode == MODE_AUTO:
             if now - self.last_auto_t > self.auto_timeout:
                 self.pub_cmd.publish(twist_zero())
-                self.mode = MODE_MANUAL
+                self.mode = MODE_STOP
+                self.stop_until = now + 1.0
                 self.publish_mode()
                 return
             self.pub_cmd.publish(self.last_auto)
             return
 
+        if now - self.last_manual_t >= self.manual_timeout:
+            self.pub_cmd.publish(twist_zero())
+            return
         self.pub_cmd.publish(self.last_manual)
 
 def main():

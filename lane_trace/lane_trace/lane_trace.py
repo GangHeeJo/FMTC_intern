@@ -130,7 +130,10 @@ class LaneMaskingNode(Node):
     def __init__(self):
         super().__init__('lane_masking_node')
         self.cv_bridge = CvBridge()
-        
+
+        self.declare_parameter('debug_view', False)
+        self.debug_view = self.get_parameter('debug_view').get_parameter_value().bool_value
+
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(Image, '/cam_lane/image_raw', self.image_callback, 10)
         self.lane_change_sub = self.create_subscription(Bool, '/lane_change_flag', self.lane_change_callback, 10)
@@ -170,9 +173,10 @@ class LaneMaskingNode(Node):
         steer_deg = np.degrees(current_steer)
         self.get_logger().info(f'Steering -> Rad: {current_steer:.3f}, Deg: {steer_deg:.1f}°')
         
-        cv2.imshow("Lane Detection (Overlay)", result_img)
-        cv2.imshow("White Mask (Binary)", mask_img)
-        cv2.waitKey(1)
+        if self.debug_view:
+            cv2.imshow("Lane Detection (Overlay)", result_img)
+            cv2.imshow("White Mask (Binary)", mask_img)
+            cv2.waitKey(1)
         
         # 제어 메시지 생성
         drive_msg = Twist()

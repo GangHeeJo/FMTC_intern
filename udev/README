@@ -1,0 +1,12 @@
+## 🔌 udev 설정 (필수)
+
+장치 포트 고정을 위해 아래 명령 실행:
+
+sudo cp ~/s1_ws/src/udev/99-robot.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
+
+version
+
+2: 새 차

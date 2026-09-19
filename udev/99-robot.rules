@@ -1,0 +1,4 @@
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0042", ATTRS{serial}=="557303238313519182D0", SYMLINK+="arduino_mega"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="e174e8ac2f182b44969412890e79dcff", SYMLINK+="rplidar"
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="082d", ATTRS{serial}=="5C3E0D1F", ATTR{index}=="0", SYMLINK+="cam_lane"
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="082d", ATTRS{serial}=="D974F03F", ATTR{index}=="0", SYMLINK+="cam_front"

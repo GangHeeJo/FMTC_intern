@@ -1,4 +1,0 @@
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0042", ATTRS{serial}=="85438363838351715251", SYMLINK+="arduino_mega"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="82098ca9ed279f4497130ad5c651bc66", SYMLINK+="rplidar"
-SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="082d", ATTRS{serial}=="E6D0F03F", SYMLINK+="cam_lane"
-SUBSYSTEM=="video4linux", ATTR{name}=="HD Pro Webcam C920", ATTR{index}=="0", KERNELS=="1-5.3", SYMLINK+="cam_front"

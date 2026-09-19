@@ -1,0 +1,45 @@
+joy_to_twist:
+  ros__parameters:
+    axis_steer: 0
+    axis_drive: 3
+    steer_deadzone: 0.15
+    drive_threshold: 0.10
+    stn_scale: 1000.0
+    invert_steer: false
+    invert_drive: false
+    publish_rate_hz: 20.0
+
+cmd_mux:
+  ros__parameters:
+    btn_auto: 0
+    btn_manual: 1
+    btn_stop: 3
+    initial_mode: 2
+    manual_timeout_s: 0.5
+    auto_timeout_s: 0.3
+    switch_stop_s: 0.2
+
+serial_sender:
+  ros__parameters:
+    port: '/dev/arduino_mega'
+    baud: 115200
+    th_threshold: 0.05
+    th_scale: 1000
+    stn_max: 1000
+    stn_deadzone: 50
+    timeout_s: 0.3
+    calib_lock_s: 6.0
+    calib_cmd: 'CAL:START'
+
+joy_node:
+  ros__parameters:
+    autorepeat_rate: 30.0
+    coalesce_interval_ms: 1
+    deadzone: 0.05
+    
+sllidar_node:
+  ros__parameters:
+    channel_type: 'serial'
+    serial_port: '/dev/rplidar'
+    serial_baudrate: 256000         # 115200 or 256000
+    frame_id: 'laser'

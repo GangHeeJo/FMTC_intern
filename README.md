@@ -44,6 +44,54 @@ src/
 - `cmd_mux`: 조이스틱 버튼(A=자동, B=수동, X=정지)으로 모드 전환, 자동/수동 명령에 타임아웃 적용해 신호 끊기면 자동 정지(failsafe).
 - `serial_sender`: `geometry_msgs/Twist`를 `"TH:<-1000..1000> STN:<-1000..1000>"` 텍스트 라인으로 변환해 시리얼로 전송. rosserial 아님, 자체 프로토콜.
 
+## 패키지별 토픽 & 동작 상세
+
+### 카메라
+
+**`lane_trace`** (node: `lane_masking_node`)
+- Sub: `/cam_lane/image_raw` (`sensor_msgs/Image`), `/lane_change_flag` (`std_msgs/Bool`)
+- Pub: `/cmd_lane` (`geometry_msgs/Twist`)
+- HLS 색공간에서 흰색만 필터링 → ROI 크롭 → auto-Canny → `HoughLinesP`로 직선 검출 → 기울기/위치로 필터링한 점들을 1차 함수로 피팅해 조향각 계산. **현재 오른쪽 차선만 봄** (ROI `right1=330~right2=640`), 좌측 로직 없음.
+- `lane_change_flag`가 True면 (장애물 회피로 반대 차선으로 넘어간 상태) 이미지를 좌우 반전해서 같은 로직을 재사용하고, 조향값도 반전해서 발행.
+- 차선 미검출 프레임에는 직전 조향값(`last_steer_rad`)을 그대로 유지해 발행 (뚝뚝 끊기는 조향 방지).
+- 속도는 `linear.x = 0.5` 고정, 조향은 rad→`angular.z`(-1000~1000 스케일)로 변환.
+
+**`sign_detect`** (node: `sign_detect`)
+- Sub: `/cam_front/image_raw` (`sensor_msgs/Image`)
+- Pub: `cross_stop` → `/cross_stop`, `light_stop` → `/light_stop` (둘 다 `std_msgs/Bool`)
+- YOLOv8(`best_0808.pt`)로 매 프레임 추론. 클래스: `0=cross-walk, 1=traffic-light-green(무시), 2=traffic-light-red, 3=traffic-light-yellow`.
+- 횡단보도는 bbox 중심이 화면 가운데 10~90% 안에 있을 때만 유효로 침, 신호등은 bbox 크기(`min_bbox_size=15500`) 이상일 때만(= 충분히 가까워졌을 때만) 유효.
+- 최근 5프레임 중 3프레임 이상 감지돼야 최종 정지 신호로 확정(노이즈 필터링).
+
+### 라이다 / 장애물 회피
+
+**`obs_evade`** (실제 실행 파일은 `obs_evade.py`, entry point 기준. `obs_evade2.py`는 좌우 번갈아 회피하는 개선판 초안인데 아직 `setup.py`에 연결 안 돼있어서 `ros2 run`으로는 안 돌아감 — 둘 중 뭘 쓸지 확인 필요)
+- Sub: `/scan` (`sensor_msgs/LaserScan`)
+- Pub: `/cmd_obs` (`geometry_msgs/Twist`), `lane_change_flag` → `/lane_change_flag` (`std_msgs/Bool`)
+- 전방 ROI(x: -1.0~-1.15m, y: ±1m)에 포인트가 30개 이상 잡히는 프레임이 5번 연속되면 장애물로 판단, **1회성으로 좌측 최대 조향 + 절반 속도를 1초간** `/cmd_obs`에 발행. 한 번 트리거되면 `evasion_triggered`가 다시 안 풀려서 그 이후로는 재판단을 안 함 (차량 한 사이클당 회피 1번만 가정).
+- `lane_change_flag`는 트리거 이후 영원히 `True` 유지 → `lane_trace`가 이걸 보고 반대 차선 기준으로 계속 주행.
+
+**`gap_follow`** / **`wall_follow`**
+- 둘 다 Sub `/scan`, **Pub `/cmd_auto`** (파라미터로 토픽 바꿀 수 있지만 기본값이 `decision_auto`가 쓰는 토픽과 동일!).
+- `gap_follow`: 360도 스캔에서 안전 버블(차체 폭 기준) 제외 후 가장 넓은 gap의 가중 중심으로 조향, 속도는 `max_speed`의 50% 고정.
+- `wall_follow`: 왼쪽 벽까지의 수직/45도 거리로 PID 오차 계산, 유효 스캔이 적거나 0.5s 이상 새 스캔이 없으면 안전 타이머가 강제로 정지 명령 발행.
+- ⚠️ **둘 다 `decision_auto`와 같은 `/cmd_auto`를 쓰므로, `s1_stack.launch.py`로 돌릴 때 같이 켜면 둘 중 누가 쓰든 서로 덮어씀.** 지금 메인 launch 파일엔 이 둘이 포함 안 돼있어서 별도의 단독 모드(F1TENTH 랩 주행용?)로 보임 — `decision_auto`와 동시 실행하면 안 됨.
+
+**`sllidar_ros2`**
+- Pub만 함: `/scan` (`sensor_msgs/LaserScan`). 하드웨어(RPLidar)와 시리얼로 직접 통신하는 Slamtec 공식 드라이버.
+
+### 제어 (`s1_stack`)
+
+**`joy_to_twist`**: Sub `/joy` (`sensor_msgs/Joy`) → Pub `/cmd_manual` (`Twist`). 조이스틱 축을 선형 매핑(데드존/스케일 파라미터화), 20Hz 주기 발행.
+
+**`cmd_mux`**: Sub `/joy`(모드 전환 버튼), `/cmd_manual`, `/cmd_auto` → Pub `/cmd_out` (`Twist`), `/drive_mode` (`UInt8`). MANUAL/AUTO/STOP 3모드, 모드 전환 시 0.2초 정지 유예, AUTO 모드에서 0.3초 이상 `/cmd_auto`가 안 오면 자동으로 MANUAL로 강제 전환.
+
+**`decision_auto`**: 위 데이터 흐름 설명대로 `/cmd_lane`+`/light_stop`+`/cross_stop`+`/cmd_obs` → `/cmd_auto`.
+
+**`serial_sender`**: Sub `/cmd_out` (`Twist`), `/calib/start` (`std_msgs/Empty`) → 시리얼로 `TH:/STN:` 텍스트 전송. 캘리브레이션 명령 수신 시 6초간 0,0 고정.
+
+**`Arduino/S1.ino`**: 시리얼로 `TH:/STN:` 라인을 받아 파싱, 모터 PWM/조향 서보 구동. 신호가 끊기면(타임아웃) 자체 failsafe로 정지.
+
 ## 빌드 & 실행
 
 ```bash

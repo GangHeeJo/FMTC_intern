@@ -27,6 +27,9 @@ class CmdMux(Node):
         self.declare_parameter('manual_timeout_s', 0.5)
         self.declare_parameter('auto_timeout_s', 0.3)
         self.declare_parameter('switch_stop_s', 0.2)
+        self.declare_parameter('allow_auto', True)
+        self.declare_parameter('require_joy_for_auto', False)
+        self.declare_parameter('joy_timeout_s', 0.5)
 
         self.btn_auto = int(self.get_parameter('btn_auto').value)
         self.btn_manual = int(self.get_parameter('btn_manual').value)
@@ -35,6 +38,12 @@ class CmdMux(Node):
         self.manual_timeout = float(self.get_parameter('manual_timeout_s').value)
         self.auto_timeout = float(self.get_parameter('auto_timeout_s').value)
         self.switch_stop_s = float(self.get_parameter('switch_stop_s').value)
+        self.allow_auto = bool(self.get_parameter('allow_auto').value)
+        self.require_joy_for_auto = bool(self.get_parameter('require_joy_for_auto').value)
+        self.joy_timeout = float(self.get_parameter('joy_timeout_s').value)
+        self.last_joy_t = None
+        if not self.allow_auto and self.mode == MODE_AUTO:
+            self.mode = MODE_STOP
 
         self.prev_buttons = []
         self.hold_until = 0.0
@@ -60,6 +69,7 @@ class CmdMux(Node):
         self.pub_mode.publish(m)
 
     def on_joy(self, msg: Joy):
+        self.last_joy_t = time.monotonic()
         if len(self.prev_buttons) != len(msg.buttons):
             self.prev_buttons = [0] * len(msg.buttons)
 
@@ -70,7 +80,7 @@ class CmdMux(Node):
         new_mode = None
         if rising(self.btn_stop): new_mode = MODE_STOP
         elif rising(self.btn_manual): new_mode = MODE_MANUAL
-        elif rising(self.btn_auto): new_mode = MODE_AUTO
+        elif rising(self.btn_auto) and self.allow_auto: new_mode = MODE_AUTO
 
         if new_mode is not None and new_mode != self.mode:
             self.pub_cmd.publish(twist_zero())
@@ -112,7 +122,9 @@ class CmdMux(Node):
             return
 
         if self.mode == MODE_AUTO:
-            if now - self.last_auto_t > self.auto_timeout:
+            joy_stale = self.require_joy_for_auto and (
+                self.last_joy_t is None or not 0 <= now - self.last_joy_t < self.joy_timeout)
+            if not self.allow_auto or joy_stale or now - self.last_auto_t > self.auto_timeout:
                 self.pub_cmd.publish(twist_zero())
                 self.mode = MODE_STOP
                 self.stop_until = now + 1.0

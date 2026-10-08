@@ -13,6 +13,7 @@
 */
 
 #include <Arduino.h>
+#include <errno.h>
 
 // -------------------- Pins --------------------
 const int MOTOR_L_IN1 = 7;
@@ -57,6 +58,7 @@ const unsigned long STEER_UPDATE_MS = 10;
 const int LINE_BUF = 80;
 char lineBuf[LINE_BUF];
 int lineLen = 0;
+bool lineOverflow = false;
 
 // -------------------- Calibration state --------------------
 int val_min = 0;
@@ -218,6 +220,10 @@ int stnToAngleDeg(int stn) {
 
 // -------------------- Non-blocking update --------------------
 void updateDrive() {
+  if (!calibrated || !control_activated) {
+    driveStop();
+    return;
+  }
   int pwmBase = throttleToPwm(cmd_th);
 
   int pwmL = clampi((int)(pwmBase * LEFT_GAIN + 0.5f), 0, DRIVE_PWM_MAX);
@@ -285,7 +291,7 @@ void moveSteeringRawForMs(bool dir1, int pwm, unsigned long ms) {
   steerStop();
 }
 
-void moveSteeringToTargetPotBlocking(int targetPot, unsigned long timeoutMs) {
+bool moveSteeringToTargetPotBlocking(int targetPot, unsigned long timeoutMs) {
   targetPot = clampi(targetPot, val_min, val_max);
   unsigned long t0 = millis();
 
@@ -295,7 +301,7 @@ void moveSteeringToTargetPotBlocking(int targetPot, unsigned long timeoutMs) {
 
     if (abs(err) <= 5) {
       steerStop();
-      return;
+      return true;
     }
 
     if (err > 0) steerTowardHigherPot(STEER_PWM_RUN);
@@ -305,12 +311,23 @@ void moveSteeringToTargetPotBlocking(int targetPot, unsigned long timeoutMs) {
   }
 
   steerStop();
+  return false;
 }
 
 // -------------------- Calibration --------------------
+void discardBufferedCommands() {
+  // Commands queued while calibration blocked are too old to start driving.
+  while (Serial.available() > 0) Serial.read();
+  lineLen = 0;
+  lineOverflow = false;
+}
+
 void calibrateSteering() {
   Serial.println("CALIB:START");
 
+  calibrated = false;
+  control_activated = false;
+  steer_active = false;
   cmd_th = 0;
   cmd_stn = 0;
   target_angle_deg = 0;
@@ -347,11 +364,11 @@ void calibrateSteering() {
     calibrated = false;
     steerStop();
     driveStop();
+    discardBufferedCommands();
     return;
   }
 
   val_mid = (val_min + val_max) / 2;
-  calibrated = true;
 
   Serial.print("CALIB val_min=");
   Serial.println(val_min);
@@ -360,29 +377,68 @@ void calibrateSteering() {
   Serial.print("CALIB val_mid=");
   Serial.println(val_mid);
 
-  moveSteeringToTargetPotBlocking(val_mid, 2500);
+  if (!moveSteeringToTargetPotBlocking(val_mid, 2500)) {
+    Serial.println("CALIB:FAILED center timeout");
+    steerStop();
+    driveStop();
+    discardBufferedCommands();
+    return;
+  }
 
   int p = potReadAvg(8);
   Serial.print("CALIB mid_reached pot=");
   Serial.println(p);
-  Serial.println("CALIB:DONE");
-
+  calibrated = true;
   steer_active = false;
+  discardBufferedCommands();
+  Serial.println("CALIB:DONE");
 }
 
 // -------------------- Serial command handling --------------------
+bool parseControlLine(const char* s, int& th, int& stn) {
+  if (strncmp(s, "TH:", 3) != 0) return false;
+  char* end;
+  errno = 0;
+  long rawTh = strtol(s + 3, &end, 10);
+  if (end == s + 3 || errno == ERANGE) return false;
+  if (*end != ' ' && *end != '\t') return false;
+  while (*end == ' ' || *end == '\t') ++end;
+  if (strncmp(end, "STN:", 4) != 0) return false;
+  const char* start = end + 4;
+  errno = 0;
+  long rawStn = strtol(start, &end, 10);
+  if (end == start || errno == ERANGE) return false;
+  while (*end == ' ' || *end == '\t') ++end;
+  if (*end != '\0') return false;
+  th = rawTh > TH_MAX ? TH_MAX : (rawTh < -TH_MAX ? -TH_MAX : (int)rawTh);
+  stn = rawStn > STN_MAX ? STN_MAX : (rawStn < -STN_MAX ? -STN_MAX : (int)rawStn);
+  return true;
+}
+
 void handleLine(const char* s) {
   while (*s == ' ' || *s == '\r' || *s == '\n' || *s == '\t') s++;
 
-  if (strncmp(s, "CAL:START", 9) == 0) {
+  if (strcmp(s, "STATUS") == 0) {
+    Serial.println(calibrated ? "STATUS:READY" : "STATUS:NOT_READY");
+    return;
+  }
+
+  if (strcmp(s, "CAL:START") == 0) {
     calibrateSteering();
     return;
   }
 
   int th = 0;
   int stn = 0;
-  int matched = sscanf(s, "TH:%d STN:%d", &th, &stn);
-  if (matched == 2) {
+  if (parseControlLine(s, th, stn)) {
+    if (!calibrated) {
+      cmd_th = 0;
+      cmd_stn = 0;
+      control_activated = false;
+      driveStop();
+      steerStop();
+      return;
+    }
     // 패킷이 들어왔으므로 타임아웃 타이머 리셋
     last_packet_ms = millis();
 
@@ -416,13 +472,16 @@ void readSerialLines() {
 
     if (c == '\n') {
       lineBuf[lineLen] = '\0';
-      handleLine(lineBuf);
+      if (!lineOverflow) handleLine(lineBuf);
       lineLen = 0;
+      lineOverflow = false;
     } else if (c != '\r') {
+      if (lineOverflow) continue;
       if (lineLen < LINE_BUF - 1) {
         lineBuf[lineLen++] = c;
       } else {
         lineLen = 0;
+        lineOverflow = true;
       }
     }
   }
@@ -455,7 +514,7 @@ void setup() {
 void loop() {
   readSerialLines();
 
-   // 신호가 1초 이상 없을 때만 작동하는 Failsafe
+   // No valid control packet for more than 2 seconds: stop both actuators.
   if (control_activated && (millis() - last_packet_ms > PACKET_TIMEOUT_MS)) {
     cmd_th = 0;
     cmd_stn = 0;

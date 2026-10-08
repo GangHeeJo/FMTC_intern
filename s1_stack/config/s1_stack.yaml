@@ -49,3 +49,5 @@ decision_auto:
   ros__parameters:
     lane_timeout_s: 0.5
     signal_timeout_s: 1.0
+    require_scan: true
+    scan_timeout_s: 0.5

@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s tests -v
 """
 import ast
 import copy
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -64,6 +65,7 @@ def load_node(filename, name, clock):
     scope = dict(__name__='callback_test', Node=Node, Twist=Twist,
                  Joy=SimpleNamespace, Bool=SimpleNamespace,
                  UInt8=SimpleNamespace, time=clock)
+    scope.update(math=math, LaserScan=SimpleNamespace, qos_profile_sensor_data=object())
     exec(compile(tree, str(ROOT / filename), 'exec'), scope)
     return scope[name]()
 
@@ -83,6 +85,11 @@ class WatchdogTests(unittest.TestCase):
         self.decision.lane_cb(command())
         self.decision.light_cb(SimpleNamespace(data=False))
         self.decision.cross_cb(SimpleNamespace(data=False))
+        self.scan()
+
+    def scan(self, ranges=(1.0, 2.0)):
+        self.decision.scan_cb(SimpleNamespace(
+            ranges=ranges, range_min=0.1, range_max=10.0, angle_increment=0.01))
 
     def output(self):
         self.decision.publish_decision()
@@ -94,6 +101,7 @@ class WatchdogTests(unittest.TestCase):
         self.decision.light_cb(SimpleNamespace(data=False))
         self.assertEqual(self.output().linear.x, 0)
         self.decision.cross_cb(SimpleNamespace(data=False))
+        self.scan()
         self.assertEqual(self.output().linear.x, 0.5)
 
     def test_lane_stall_stops_and_fresh_input_recovers(self):
@@ -102,6 +110,7 @@ class WatchdogTests(unittest.TestCase):
         self.clock.now += 0.51
         self.assertEqual(self.output().linear.x, 0)
         self.decision.lane_cb(command())
+        self.scan()
         self.assertEqual(self.output().linear.x, 0.5)
 
     def test_each_signal_stream_must_stay_live(self):
@@ -110,6 +119,7 @@ class WatchdogTests(unittest.TestCase):
                 self.ready()
                 self.clock.now += 1.01
                 self.decision.lane_cb(command())
+                self.scan()
                 if stale == 'light':
                     self.decision.cross_cb(SimpleNamespace(data=False))
                 else:
@@ -135,7 +145,57 @@ class WatchdogTests(unittest.TestCase):
         self.ready()
         self.clock.now += 0.51
         self.decision.obs_cb(command(0.7, 1000))
+        self.scan()
         self.assertEqual(self.output().linear.x, 0)
+
+    def test_disabled_evasion_ignores_stray_obstacle_commands(self):
+        self.ready()
+        self.decision.allow_evasion = False
+        self.decision.obs_cb(command(0.7, 1000))
+        self.assertEqual(self.output().angular.z, 100)
+
+    def test_lidar_missing_stale_and_unusable_stop(self):
+        self.ready()
+        self.decision.last_scan_time = None
+        self.assertEqual(self.output().linear.x, 0)
+        self.scan()
+        self.assertEqual(self.output().linear.x, 0.5)
+        self.clock.now += 0.51
+        self.decision.lane_cb(command())
+        self.assertEqual(self.output().linear.x, 0)
+        for ranges in ([], [float('nan')], [float('inf')], [0.0], [-1.0]):
+            self.scan(ranges)
+            self.assertEqual(self.output().linear.x, 0)
+
+    def test_lane_loss_overrides_live_evasion(self):
+        self.ready()
+        self.decision.obs_cb(command(0.7, 1000))
+        self.decision.lane_cb(command(0.0, 100))
+        self.assertEqual(self.output().linear.x, 0)
+
+    def test_manual_profile_cannot_select_auto(self):
+        mux = load_node('cmd_mux.py', 'CmdMux', self.clock)
+        mux.allow_auto = False
+        mux.on_joy(SimpleNamespace(buttons=[1, 0, 0, 0]))
+        self.assertEqual(mux.mode, 2)
+
+    def test_auto_joystick_loss_latches_stop(self):
+        mux = load_node('cmd_mux.py', 'CmdMux', self.clock)
+        mux.require_joy_for_auto = True
+        mux.mode = 1
+        mux.on_auto(command())
+        mux.on_timer()
+        self.assertEqual(mux.mode, 2)
+        mux.on_joy(SimpleNamespace(buttons=[1, 0, 0, 0]))
+        self.clock.now += 0.21
+        mux.on_auto(command())
+        mux.on_timer()
+        self.assertEqual(mux.mode, 1)
+        self.clock.now += 0.51
+        mux.on_auto(command())
+        mux.on_timer()
+        self.assertEqual(mux.mode, 2)
+        self.assertEqual(mux.pub_cmd.messages[-1].linear.x, 0)
 
     def test_joy_stall_propagates_stop_through_mux(self):
         joy = load_node('joy_to_twist.py', 'JoyToTwist', self.clock)

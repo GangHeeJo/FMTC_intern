@@ -136,3 +136,5 @@ USB로 실물 하드웨어 대신 각자 노트북(WSL2)에서 먼저 돌려볼 
    ```
 
 USB 카메라/라이다/아두이노는 `usbipd-win`(윈도우 쪽)으로 WSL에 attach — 윈도우 재부팅/재연결할 때마다 다시 attach 필요.
+
+3. **카메라 이미지 토픽이 구독자한테 하나도 안 들어옴** (`lane_trace`/`sign_detect`가 로그도 안 찍고 조용히 멈춰있는 것처럼 보임) — `qos_profile_sensor_data`(best-effort) 구독 + 일반(reliable) publisher 조합에서, **이미지가 일정 크기 이상이면 이 WSL2 환경에서 전달 자체가 안 되는 현상 확인함** (8x8 테스트 이미지는 통과, 480x480은 0% 도달). `usb_cam`이 기본 reliable로 publish하는 경우 특히 해당. 실제 로봇(네이티브 리눅스)에서는 이 QoS 조합이 표준이라 문제 없을 가능성이 높지만, WSL2로 카메라 노드 테스트할 땐 이미지가 실제로 도착하는지 반드시 별도로 확인할 것 (예: `ros2 topic hz /cam_lane/image_raw`). 안 들어오면 임시로 구독 QoS를 reliable로 바꿔서 확인해볼 것.

@@ -114,3 +114,7 @@ ros2 run sign_detect sign_detect --ros-args -p model_path:=/절대/경로/best_0
 - `lane_trace`는 현재 **오른쪽 차선만** 검출함. 보고서 PDF의 예전 ROS1 버전은 좌/우 양쪽 차선 + `check_pixel_color` 색 검증까지 있었는데, ROS2로 옮기면서 빠짐 — 의도적 단순화인지 확인 필요.
 - `usb_cam`, `cv_bridge`가 humble용으로 실제 설치돼있는지, `numpy<2.0` 고정이 유지되는지(README 참고) 검증 차량에서 확인 필요.
 - `lane_trace`의 ROI/HLS 임계값은 특정 조도 기준 튜닝값 — 10월 검증 트랙(4층 로비) 조명에 맞게 재조정 필요할 수 있음.
+- **DBSCAN 라이다 클러스터링 미구현**: 공식 목표 아키텍처(2026-10-08 공유된 구조도)와 예전 ROS1 코드(결과보고서 PDF)엔 `sklearn.cluster.DBSCAN` 기반 장애물 클러스터링이 있는데, 현재 `obs_evade`/`gap_follow`/`wall_follow`는 전부 단순 ROI/gap 거리 임계값 방식임. 김민준 담당 파트.
+- **주차(parking) 기능 전체가 없음**: HW엔 주차용 초음파센서(HC-SR04 ×2)가 있고 목표 구조도에도 주차 탐색/후진 주차 상태(S4~S5)가 있는데, 현재 repo엔 초음파 관련 노드/토픽이 아예 없음.
+- 목표 구조도는 아두이노 통신을 "rosserial"로 표기하고 토픽 이름도 다름(`/camera/lane_image_raw`, `/cluster_info` 등) — 현재 repo의 자체 시리얼 프로토콜/토픽 이름과 다르지만 기능상 문제는 아님, 다이어그램 보고 그대로 새로 짜지 않도록 주의.
+- 공식 HW 매뉴얼(2026-07-06) 기준 실제 차량 제어 PC는 **Ubuntu 20.04 + ROS1(Noetic)** — 이 repo(ROS2 humble)는 아직 실차에 올라간 적 없음. 검증 전에 Ubuntu 22.04+humble(또는 Docker) 올리는 작업이 선행되어야 함.

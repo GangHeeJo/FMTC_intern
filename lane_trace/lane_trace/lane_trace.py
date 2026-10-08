@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 import numpy as np
 import cv2
 from sensor_msgs.msg import Image
@@ -135,7 +136,8 @@ class LaneMaskingNode(Node):
         self.debug_view = self.get_parameter('debug_view').get_parameter_value().bool_value
 
         # Subscriber & Publisher
-        self.img_sub = self.create_subscription(Image, '/cam_lane/image_raw', self.image_callback, 10)
+        self.img_sub = self.create_subscription(
+            Image, '/cam_lane/image_raw', self.image_callback, qos_profile_sensor_data)
         self.lane_change_sub = self.create_subscription(Bool, '/lane_change_flag', self.lane_change_callback, 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_lane', 10)
         
@@ -158,8 +160,8 @@ class LaneMaskingNode(Node):
             # 새로운 값이 들어왔을 때만 업데이트
             self.last_steer_rad = steer_rad
         else:
-            # 검출 실패 시 이전 값 유지 (로그로 표시하면 디버깅에 좋음)
-            self.get_logger().warn('Lane lost - maintaining last steering value')
+            # 조향은 마지막 값 유지하되, 차선 없는 상태로 계속 전진하면 위험하니 속도는 멈춤
+            self.get_logger().warn('Lane lost - stopping throttle')
         
         # 현재(또는 유지된) 조향값 사용
         current_steer = self.last_steer_rad
@@ -180,7 +182,7 @@ class LaneMaskingNode(Node):
         
         # 제어 메시지 생성
         drive_msg = Twist()
-        drive_msg.linear.x = 0.5  # 고정 속도
+        drive_msg.linear.x = 0.5 if steer_rad is not None else 0.0  # 차선 미검출 시 정지
         # 0.4 rad일 때 1000이 되도록 맵핑 (1000 / 0.4 = 2500)
         drive_msg.angular.z = -float(current_steer * 2500.0)
         

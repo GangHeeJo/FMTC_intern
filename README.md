@@ -118,3 +118,21 @@ ros2 run sign_detect sign_detect --ros-args -p model_path:=/절대/경로/best_0
 - **주차(parking) 기능 전체가 없음**: HW엔 주차용 초음파센서(HC-SR04 ×2)가 있고 목표 구조도에도 주차 탐색/후진 주차 상태(S4~S5)가 있는데, 현재 repo엔 초음파 관련 노드/토픽이 아예 없음.
 - 목표 구조도는 아두이노 통신을 "rosserial"로 표기하고 토픽 이름도 다름(`/camera/lane_image_raw`, `/cluster_info` 등) — 현재 repo의 자체 시리얼 프로토콜/토픽 이름과 다르지만 기능상 문제는 아님, 다이어그램 보고 그대로 새로 짜지 않도록 주의.
 - 공식 HW 매뉴얼(2026-07-06) 기준 실제 차량 제어 PC는 **Ubuntu 20.04 + ROS1(Noetic)** — 이 repo(ROS2 humble)는 아직 실차에 올라간 적 없음. 검증 전에 Ubuntu 22.04+humble(또는 Docker) 올리는 작업이 선행되어야 함.
+
+## WSL2(Ubuntu 22.04)로 검증할 때 꼭 필요한 설정
+
+USB로 실물 하드웨어 대신 각자 노트북(WSL2)에서 먼저 돌려볼 때 거의 확실히 겪는 문제 2개, 미리 해두면 시간 절약됨:
+
+1. **colcon build가 "성공한 것처럼 보이는데" 실제로는 패키지가 등록 안 됨** — `pip install`(ultralytics/torch 등)이 최신 `setuptools`를 끌고 들어오면서 ROS2 humble의 구버전 `ament_python` 빌드 방식과 충돌(`TypeError: canonicalize_version() got an unexpected keyword argument 'strip_trailing_zero'`). `ros2 pkg list`에 패키지가 안 뜨면 이거 의심.
+   ```bash
+   pip install "setuptools==58.2.0"
+   rm -rf build install log && colcon build --symlink-install   # 반드시 클린 재빌드
+   ```
+2. **노드끼리 서로 못 찾음** (`ros2 node list`가 비어있음, publish해도 "Waiting for at least 1 matching subscription(s)..."에서 멈춤) — WSL2 가상 네트워크가 기본 DDS(Fast-DDS)의 멀티캐스트 디스커버리를 막아서 생김. CycloneDDS로 바꾸면 해결:
+   ```bash
+   sudo apt install -y ros-humble-rmw-cyclonedds-cpp
+   echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc
+   echo 'export ROS_LOCALHOST_ONLY=1' >> ~/.bashrc
+   ```
+
+USB 카메라/라이다/아두이노는 `usbipd-win`(윈도우 쪽)으로 WSL에 attach — 윈도우 재부팅/재연결할 때마다 다시 attach 필요.

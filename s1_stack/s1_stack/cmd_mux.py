@@ -120,6 +120,10 @@ class CmdMux(Node):
             self.pub_cmd.publish(self.last_auto)
             return
 
+        # 수동 명령이 끊기면(조이스틱 연결 끊김 등) 마지막 명령을 계속 반복하지 않고 정지
+        if now - self.last_manual_t >= self.manual_timeout:
+            self.pub_cmd.publish(twist_zero())
+            return
         self.pub_cmd.publish(self.last_manual)
 
 def main():

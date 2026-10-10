@@ -12,8 +12,11 @@ class MotionDecision(Node):
         # 입력 신선도(stale input) 체크용 타임아웃
         self.declare_parameter('lane_timeout_s', 0.5)
         self.declare_parameter('signal_timeout_s', 1.0)
+        # 카메라 1대로만 벤치 테스트할 때 등, sign_detect(신호등) 없이 돌려야 하면 false로
+        self.declare_parameter('require_signals', True)
         self.lane_timeout = float(self.get_parameter('lane_timeout_s').value)
         self.signal_timeout = float(self.get_parameter('signal_timeout_s').value)
+        self.require_signals = bool(self.get_parameter('require_signals').value)
         self.last_lane_time = None
         self.last_light_time = None
         self.last_cross_time = None
@@ -66,11 +69,14 @@ class MotionDecision(Node):
             return received_at is not None and 0 <= current_time - received_at < timeout
 
         # [안전장치] 차선/신호 입력이 끊기거나 오래됐으면, 다른 판단 하지 말고 바로 정지
-        inputs_ready = (
-            fresh(self.last_lane_time, self.lane_timeout)
-            and fresh(self.last_light_time, self.signal_timeout)
-            and fresh(self.last_cross_time, self.signal_timeout)
-        )
+        # (require_signals=false면 신호등 카메라 없이 차선만으로도 테스트 가능)
+        inputs_ready = fresh(self.last_lane_time, self.lane_timeout)
+        if self.require_signals:
+            inputs_ready = (
+                inputs_ready
+                and fresh(self.last_light_time, self.signal_timeout)
+                and fresh(self.last_cross_time, self.signal_timeout)
+            )
         if not inputs_ready:
             msg.angular.z = self.current_lane_cmd.angular.z
             msg.linear.x = 0.0

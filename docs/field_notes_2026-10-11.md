@@ -146,3 +146,12 @@ ros2 run sign_detect sign_detect --ros-args -p model_path:=$HOME/FMTC_intern/sig
 - `pkill -f <패턴>`은 그 패턴이 들어간 자기 셸 명령까지 죽일 수 있으니 PID로 종료.
 - 한 번에 여러 설정을 바꾸지 말고 기준선에서 하나씩.
 - 허브가 부하에서 반복해서 무너져 카메라/Arduino가 빠졌다. 빠지면 `usb_cam` 노드도 죽으므로 launch를 다시 켤 것.
+
+## 문서/도구 위치 (자세한 내용)
+
+- `docs/lane_following_guide.md`: 현재 상태, 조향이 만들어지는 수식/단위, 파라미터 레퍼런스, 튜닝 순서, 앞으로 바꿀 것(점선 병행 설계 포함).
+- `scripts/lane_tuning/`: `calib_pose.py`(기준자세 보정), `bag_summary.py`, `bag_param_sweep.py`, `bag_montage.py`(rosbag 기반 분석).
+
+## USB 연결 구조 (사용자 확인)
+
+노트북 USB-A → "A to A 허브" → ① Arduino ② 다른 허브(카메라 2대 + 라이다). 허브가 2단이라 `lsusb -t`에서 허브 안에 허브가 보인다.

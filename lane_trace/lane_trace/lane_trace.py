@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 import numpy as np
+import time
 import cv2
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
@@ -138,6 +139,10 @@ class LaneMaskingNode(Node):
         # 차선 추종 시 전진 속도(linear.x, 0~1). serial_sender의 th_scale과 곱해져 실제 TH가 됨
         self.declare_parameter('linear_speed', 0.5)
         self.linear_speed = float(self.get_parameter('linear_speed').value)
+        # 차선을 놓친 직후 이 시간(초) 동안은 마지막 조향으로 계속 전진. 0이면 놓치는 즉시 정지(기존 동작)
+        self.declare_parameter('lost_hold_s', 0.0)
+        self.lost_hold_s = float(self.get_parameter('lost_hold_s').value)
+        self.last_detect_t = None
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -163,6 +168,7 @@ class LaneMaskingNode(Node):
         if steer_rad is not None:
             # 새로운 값이 들어왔을 때만 업데이트
             self.last_steer_rad = steer_rad
+            self.last_detect_t = time.time()
         else:
             # 조향은 마지막 값 유지하되, 차선 없는 상태로 계속 전진하면 위험하니 속도는 멈춤
             self.get_logger().warn('Lane lost - stopping throttle')
@@ -186,7 +192,9 @@ class LaneMaskingNode(Node):
         
         # 제어 메시지 생성
         drive_msg = Twist()
-        drive_msg.linear.x = self.linear_speed if steer_rad is not None else 0.0  # 차선 미검출 시 정지
+        recently_seen = (self.last_detect_t is not None
+                         and time.time() - self.last_detect_t <= self.lost_hold_s)
+        drive_msg.linear.x = self.linear_speed if (steer_rad is not None or recently_seen) else 0.0  # 차선 미검출 시 정지
         # 0.4 rad일 때 1000이 되도록 맵핑 (1000 / 0.4 = 2500)
         drive_msg.angular.z = -float(current_steer * 2500.0)
         

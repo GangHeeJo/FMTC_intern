@@ -135,6 +135,10 @@ class LaneMaskingNode(Node):
         self.declare_parameter('debug_view', False)
         self.debug_view = self.get_parameter('debug_view').get_parameter_value().bool_value
 
+        # 차선 추종 시 전진 속도(linear.x, 0~1). serial_sender의 th_scale과 곱해져 실제 TH가 됨
+        self.declare_parameter('linear_speed', 0.5)
+        self.linear_speed = float(self.get_parameter('linear_speed').value)
+
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
             Image, '/cam_lane/image_raw', self.image_callback, qos_profile_sensor_data)
@@ -182,7 +186,7 @@ class LaneMaskingNode(Node):
         
         # 제어 메시지 생성
         drive_msg = Twist()
-        drive_msg.linear.x = 0.5 if steer_rad is not None else 0.0  # 차선 미검출 시 정지
+        drive_msg.linear.x = self.linear_speed if steer_rad is not None else 0.0  # 차선 미검출 시 정지
         # 0.4 rad일 때 1000이 되도록 맵핑 (1000 / 0.4 = 2500)
         drive_msg.angular.z = -float(current_steer * 2500.0)
         

@@ -1,6 +1,6 @@
 # Field Notes — 2026-10-11 (네이티브 Ubuntu 22.04 환경 구축)
 
-> 먼저 [인수인계 문서](handoff_2026-10-11.md)를 읽으세요. 이 문서는 그 문서에서 링크되는 상세 자료입니다.
+> 먼저 [인수인계 문서](../summary/handoff_2026-10-11.md)를 읽으세요. 이 문서는 그 문서에서 링크되는 상세 자료입니다.
 
 10일 노트(`field_notes_2026-10-10.md`)의 결론대로 카메라 노드는 네이티브 Linux에서
 돌려야 해서, 개발 머신을 Ubuntu 22.04.5(네이티브)로 옮겨 환경을 구축했다.
@@ -93,7 +93,7 @@ USB가 순간적으로 끊겨도 노드가 종료되지 않도록 수정(커밋 
 
 - **블루투스와 Wi-Fi가 동작하지 않음**: 내장 칩(BT `8087:0037`, Wi-Fi `8086:a840`)에 커널 `6.8.0-138` 드라이버가
   붙지 않아 `hci0`/`wlan`이 없음. 인터넷은 iPhone USB 테더링으로 해결. 조이스틱은 유선(USB-C)만 가능.
-- 노트북 포트가 부족함(연결 구조 전체는 [인수인계 문서](handoff_2026-10-11.md)에만 적어 둠). 충전 중인 USB-C 포트는 데이터 호스트로 동작하지 않음(`/sys/class/typec/port*/data_role`로 확인 가능).
+- 노트북 포트가 부족함(연결 구조 전체는 [인수인계 문서](../summary/handoff_2026-10-11.md)에만 적어 둠). 충전 중인 USB-C 포트는 데이터 호스트로 동작하지 않음(`/sys/class/typec/port*/data_role`로 확인 가능).
   C→A 변환 어댑터가 인식되지 않는 경우가 있었으니(`partner=0`), 안 되면 다른 어댑터를 쓸 것.
 
 ## 테스트용 임시 설정 (로컬에만 있고 커밋하지 않음)
@@ -103,7 +103,7 @@ USB가 순간적으로 끊겨도 노드가 종료되지 않도록 수정(커밋 
 
 ## 차선 추종 튜닝 (요약)
 
-상세 수식/파라미터/튜닝 순서/개선 설계는 `docs/lane_following_guide.md`, 인수인계 요약은 `docs/handoff_2026-10-11.md`를 본다.
+상세 수식/파라미터/튜닝 순서/개선 설계는 `docs/records/lane_following_guide.md`, 인수인계 요약은 `docs/summary/handoff_2026-10-11.md`를 본다.
 여기에는 현장에서 얻은 교훈만 남긴다.
 
 - 후보 설정은 rosbag에 저장한 영상에 `lane_detect`를 다시 돌려(`scripts/lane_tuning/bag_param_sweep.py`) 먼저 거른 뒤 현장에서 하나만 시험한다.
@@ -115,5 +115,5 @@ USB가 순간적으로 끊겨도 노드가 종료되지 않도록 수정(커밋 
 
 ## 문서/도구 위치 (자세한 내용)
 
-- `docs/lane_following_guide.md`: 현재 상태, 조향이 만들어지는 수식/단위, 파라미터 레퍼런스, 튜닝 순서, 앞으로 바꿀 것(점선 병행 설계 포함).
+- `docs/records/lane_following_guide.md`: 현재 상태, 조향이 만들어지는 수식/단위, 파라미터 레퍼런스, 튜닝 순서, 앞으로 바꿀 것(점선 병행 설계 포함).
 - `scripts/lane_tuning/`: `calib_pose.py`(기준자세 보정), `bag_summary.py`, `bag_param_sweep.py`, `bag_montage.py`(rosbag 기반 분석).

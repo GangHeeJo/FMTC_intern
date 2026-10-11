@@ -31,7 +31,13 @@ pip install "numpy<2.0" pyserial
 
 echo "=== 6. .bashrc env ==="
 grep -qxF "source /opt/ros/humble/setup.bash" ~/.bashrc || echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
-grep -qxF "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" ~/.bashrc || echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
+# CycloneDDS는 WSL2/VM에서 노드끼리 서로 못 찾는 문제를 피하려고 쓴다. 네이티브 Ubuntu(NATIVE=1)에서는
+# 오히려 큰 이미지 토픽(카메라)이 전달되지 않으므로 넣지 않는다 (2026-10-11 확인, 기본 FastDDS 사용).
+if [ "${NATIVE:-0}" != "1" ]; then
+  grep -qxF "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" ~/.bashrc || echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
+fi
+# 새 터미널에서 이 워크스페이스를 자동으로 불러오기 (빌드 후 install/ 이 생김)
+grep -qxF "source ~/FMTC_intern/install/setup.bash" ~/.bashrc || echo "source ~/FMTC_intern/install/setup.bash" >> ~/.bashrc
 
 echo "=== 7. clone repo + build ==="
 cd ~
@@ -48,6 +54,20 @@ echo "=== 8. udev rules ==="
 sudo cp udev/99-robot.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
+
+echo "=== 9. (선택) 네이티브 실차 머신: USB 자동 절전 끄기 ==="
+# Arduino/허브가 몇 초마다 끊기는 원인이 USB 자동 절전(autosuspend)이었음. NATIVE=1 bash vm_setup.sh 로 실행하면 적용.
+if [ "${NATIVE:-0}" = "1" ]; then
+  if ! grep -q "usbcore.autosuspend=-1" /etc/default/grub; then
+    sudo sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 usbcore.autosuspend=-1"/' /etc/default/grub
+    sudo update-grub
+    echo "적용됨. 재부팅해야 완전히 반영됩니다."
+  else
+    echo "이미 적용되어 있음"
+  fi
+else
+  echo "건너뜀 (VM이면 필요 없음. 실차 노트북이면 NATIVE=1 로 실행)"
+fi
 
 echo "=== DONE ==="
 echo "터미널 새로 열거나 'source ~/.bashrc' 하면 바로 ros2 명령 사용 가능"

@@ -2,8 +2,10 @@
 
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import qos_profile_sensor_data
 import numpy as np
+import time
 import cv2
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
@@ -40,13 +42,18 @@ def auto_canny(image, sigma=0.33):
     edged = cv2.Canny(image_blur, lower, upper) # 블러 처리된 이미지를 사용
     return edged
 
-def lane_detect(image):
+# 마지막 검출의 선 기울기/위치 (기준값 보정용으로 외부에서 읽음)
+last_metrics = {}
+
+
+def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027,
+                min_slope=0.4, right1=330, right2=640, roi_top=220):
 
     result_overlay = image.copy()
     mask = color_filter(image)
 
     # 기존 ROI 유지
-    start_point = (100, 220)
+    start_point = (100, roi_top)
     end_point = (640, 450)
     mask_crop = image_crop(mask, start_point, end_point)
     
@@ -60,7 +67,6 @@ def lane_detect(image):
     
     # 관심 영역 상수 (기존 유지)
     m, n, k = 0.3, (620, 380), 700
-    right1, right2 = 330, 640
     
     # 필터링용 사선 및 수직선 (빨간색)
     cross_x = n[0] - k
@@ -70,12 +76,8 @@ def lane_detect(image):
     cv2.line(result_overlay, (right1, 0), (right1, 480), (0, 0, 255), 1)
     cv2.line(result_overlay, (right2, 0), (right2, 480), (0, 0, 255), 1)
 
-    # 가이드 및 조향 상수
-    guide_x, guide_slope = 550, 1.11
-
-    # --- 조향 가중치 수정 (0.4 rad 직접 계산용) ---
-    a_rad, b_rad = 0.5, 0.0027  # a: 0.486 -> 0.5  /  b: 0.0017 -> 0.0035
-    # ------------------------------------------
+    # 가이드 및 조향 상수는 함수 인자로 받음 (기본값은 기존 튜닝값)
+    # a_rad: 각도 오차 가중치, b_rad: 위치 오차(픽셀) 가중치
 
     slope_avg, i, sum_slope = guide_slope, 0, 0
 
@@ -88,7 +90,7 @@ def lane_detect(image):
             # ROI 필터링: m_2(우측 상단 대각선) 조건을 제거하여 영역을 확장함
             if ((midpoint[0] > right1) and (midpoint[0] < right2) and 
                 (m * (midpoint[0] - n[0]) + (n[1] - midpoint[1]) > 0) and 
-                abs(slope) > 0.4):
+                abs(slope) > min_slope):
                 filtered_points.append((x1, y1))
                 filtered_points.append((x2, y2))
                 cv2.line(result_overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -116,7 +118,10 @@ def lane_detect(image):
 
     # 검출 실패 시 None 반환
     if not detected:
+        last_metrics.clear()
         return result_overlay, mask, None
+
+    last_metrics.update({'slope_avg': float(slope_avg), 'x_value': float(x_value)})
 
     # 5. 조향값 직접 계산 (이미 rad 단위이므로 Scaling 불필요)
     steering_rad = a_rad * (slope_avg - guide_slope) + b_rad * (x_value - guide_x)
@@ -134,6 +139,33 @@ class LaneMaskingNode(Node):
 
         self.declare_parameter('debug_view', False)
         self.debug_view = self.get_parameter('debug_view').get_parameter_value().bool_value
+
+        # 차선 추종 시 전진 속도(linear.x, 0~1). serial_sender의 th_scale과 곱해져 실제 TH가 됨
+        self.declare_parameter('linear_speed', 0.5, ParameterDescriptor(dynamic_typing=True))
+        self.linear_speed = float(self.get_parameter('linear_speed').value)
+        # 차선을 놓친 직후 이 시간(초) 동안은 마지막 조향으로 계속 전진. 0이면 놓치는 즉시 정지(기존 동작)
+        self.declare_parameter('lost_hold_s', 0.0, ParameterDescriptor(dynamic_typing=True))
+        self.lost_hold_s = float(self.get_parameter('lost_hold_s').value)
+        self.last_detect_t = None
+
+        # 조향 기준값: 차를 원하는 위치/방향에 놓았을 때 측정한 선의 위치(px)와 기울기(rad)
+        self.declare_parameter('guide_x', 550.0, ParameterDescriptor(dynamic_typing=True))
+        self.declare_parameter('guide_slope', 1.11, ParameterDescriptor(dynamic_typing=True))
+        self.guide_x = float(self.get_parameter('guide_x').value)
+        self.guide_slope = float(self.get_parameter('guide_slope').value)
+
+        # 차선 후보로 인정하는 조건: 선의 최소 기울기, 인식 구역 왼쪽 경계(px). 코너에서 휜 선을 잡으려면 낮춤
+        self.declare_parameter('min_slope', 0.4, ParameterDescriptor(dynamic_typing=True))
+        self.declare_parameter('right1', 330, ParameterDescriptor(dynamic_typing=True))
+        self.min_slope = float(self.get_parameter('min_slope').value)
+        self.right1 = int(self.get_parameter('right1').value)
+
+        # 인식 구역 위쪽 경계(px, 클수록 가까운 곳만 봄)와 조향 중앙값 필터 길이(1이면 끔)
+        self.declare_parameter('roi_top', 220, ParameterDescriptor(dynamic_typing=True))
+        self.declare_parameter('steer_filter_n', 1, ParameterDescriptor(dynamic_typing=True))
+        self.roi_top = int(self.get_parameter('roi_top').value)
+        self.steer_filter_n = max(1, int(self.get_parameter('steer_filter_n').value))
+        self.steer_hist = []
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -153,18 +185,27 @@ class LaneMaskingNode(Node):
         if self.lane_change_flag is True:
             image = cv2.flip(image, 1) # 이미지 반전
             
-        result_img, mask_img, steer_rad = lane_detect(image)
+        result_img, mask_img, steer_rad = lane_detect(image, self.guide_x, self.guide_slope,
+                                                       min_slope=self.min_slope, right1=self.right1, roi_top=self.roi_top)
         
         # --- 수정된 로직 ---
         if steer_rad is not None:
             # 새로운 값이 들어왔을 때만 업데이트
-            self.last_steer_rad = steer_rad
+            # 한두 프레임 튀는 값(엉뚱한 선)을 걸러내는 중앙값 필터
+            self.steer_hist.append(float(steer_rad))
+            self.steer_hist = self.steer_hist[-self.steer_filter_n:]
+            self.last_steer_rad = float(np.median(self.steer_hist))
+            self.last_detect_t = time.time()
         else:
             # 조향은 마지막 값 유지하되, 차선 없는 상태로 계속 전진하면 위험하니 속도는 멈춤
             self.get_logger().warn('Lane lost - stopping throttle')
         
         # 현재(또는 유지된) 조향값 사용
         current_steer = self.last_steer_rad
+        # lost_hold_s를 쓰는 경우, 그 시간 넘게 차선을 못 보면 마지막 조향(최대치일 수 있음)을 버리고 중앙으로
+        if (self.lost_hold_s > 0.0 and steer_rad is None
+                and (self.last_detect_t is None or time.time() - self.last_detect_t > self.lost_hold_s)):
+            current_steer = 0.0
         # -----------------        
         
         # --- [추가] 조향 부호 반전 로직 ---
@@ -182,7 +223,9 @@ class LaneMaskingNode(Node):
         
         # 제어 메시지 생성
         drive_msg = Twist()
-        drive_msg.linear.x = 0.5 if steer_rad is not None else 0.0  # 차선 미검출 시 정지
+        recently_seen = (self.last_detect_t is not None
+                         and time.time() - self.last_detect_t <= self.lost_hold_s)
+        drive_msg.linear.x = self.linear_speed if (steer_rad is not None or recently_seen) else 0.0  # 차선 미검출 시 정지
         # 0.4 rad일 때 1000이 되도록 맵핑 (1000 / 0.4 = 2500)
         drive_msg.angular.z = -float(current_steer * 2500.0)
         

@@ -31,7 +31,13 @@ pip install "numpy<2.0" pyserial
 
 echo "=== 6. .bashrc env ==="
 grep -qxF "source /opt/ros/humble/setup.bash" ~/.bashrc || echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
-grep -qxF "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" ~/.bashrc || echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
+# CycloneDDS는 WSL2/VM에서 노드끼리 서로 못 찾는 문제를 피하려고 쓴다. 네이티브 Ubuntu(NATIVE=1)에서는
+# 오히려 큰 이미지 토픽(카메라)이 전달되지 않으므로 넣지 않는다 (2026-10-11 확인, 기본 FastDDS 사용).
+if [ "${NATIVE:-0}" != "1" ]; then
+  grep -qxF "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" ~/.bashrc || echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
+fi
+# 새 터미널에서 이 워크스페이스를 자동으로 불러오기 (빌드 후 install/ 이 생김)
+grep -qxF "source ~/FMTC_intern/install/setup.bash" ~/.bashrc || echo "source ~/FMTC_intern/install/setup.bash" >> ~/.bashrc
 
 echo "=== 7. clone repo + build ==="
 cd ~

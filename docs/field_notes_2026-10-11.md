@@ -100,52 +100,17 @@ USB가 순간적으로 끊겨도 노드가 종료되지 않도록 수정(커밋 
 `s1_stack/config/s1_stack.yaml`: `th_scale: 200`(기본 1000, 저속 시험용), 조이스틱 축 번호.
 커밋 전에 이 파일은 반드시 제외하거나 원래대로 되돌릴 것.
 
-## 차선 추종(lane_trace) 튜닝 결과 (rosbag 기반)
+## 차선 추종 튜닝 (요약)
 
-`ros2 bag record`로 `/cmd_lane /cmd_auto /cmd_out /drive_mode /joy /cam_lane/image_raw`를 60초씩 기록하고,
-저장된 영상에 `lane_detect`를 오프라인으로 다시 돌려 설정 후보를 비교했다. 현장에 권하기 전에 영상으로 먼저 검증하는 방식이 빨랐다.
+상세 수식/파라미터/튜닝 순서/개선 설계는 `docs/lane_following_guide.md`, 인수인계 요약은 `docs/handoff_2026-10-11.md`를 본다.
+여기에는 현장에서 얻은 교훈만 남긴다.
 
-**기준선(가장 잘 됐던 설정, 직선에서 조향이 0으로 수렴, 코너에서 올바른 방향 유지, 전진 끊김 거의 없음)**
-
-```bash
-ros2 launch s1_stack s1_stack.launch.py            # s1_stack.yaml의 th_scale: 450 (로컬 임시값)
-ros2 run lane_trace lane_trace --ros-args -p linear_speed:=1.0 -p lost_hold_s:=1.5 -p guide_slope:=0.524 -p guide_x:=531
-ros2 run sign_detect sign_detect --ros-args -p model_path:=$HOME/FMTC_intern/sign_detect/best_0808.pt
-```
-
-**원인과 수정(모두 파라미터이고 기본값은 기존 동작과 같음)**
-
-- 조향이 한쪽으로 몰림: 기준값 `guide_slope=1.11`, `guide_x=550`이 예전 카메라 설치에 맞춘 값이라 지금 카메라에서는 이상적인 자세에서도
-  조향이 +850 근처로 나왔다. 원하는 자세에 놓고 선의 기울기/위치를 5초 측정해 `guide_slope:=0.524 -p guide_x:=531`로 보정.
-- 찔끔찔끔 전진: 차선 검출이 프레임마다 깜빡이면 검출 못 한 프레임에서 `linear.x=0`. `lost_hold_s`(놓친 뒤 전진과 마지막 조향 유지 시간)로 완화.
-  `lost_hold_s>0`이면 그 시간을 넘겨 놓칠 때 조향도 중앙으로 복귀.
-- 정수로 준 파라미터(`-p guide_x:=531`)가 `InvalidParameterTypeException`: 동적 타입 허용으로 수정.
-- 추가한 파라미터: `linear_speed`, `lost_hold_s`, `guide_x`, `guide_slope`, `min_slope`, `right1`, `roi_top`, `steer_filter_n`.
-
-**하지 말아야 할 것(영상 재생으로 확인)**
-
-| 변경 | 결과 |
-|---|---|
-| `min_slope 0.1`, `right1 200` | 주차 박스 가로선을 차선으로 잡아 조향이 ±1000으로 진동 (포화 10% → 24%) |
-| `roi_top 280` (가까이만 보기) | 직선에서는 포화 0%지만 위치가 다르면 검출률 2~28%로 붕괴 |
-| `th_scale 600` | 조향 능력을 넘어 트랙 밖으로 벗어남. 450이 한계로 보임 |
-
-**조향이 한쪽으로 몰리는 구간에서 한 번에 하나씩만 바꿀 후보**: `min_slope:=0.35`. 차가 트랙 중앙 쪽으로 가서 선이 완만하게 보일 때(검출률 34% → 73%)
-도움이 되지만 잘 되던 주행에서는 포화가 4.8% → 11.3%로 늘어 맞교환임. 현장 검증은 아직 못 함.
-중앙값 필터(`steer_filter_n:=5`)는 영상 재생에서 조향 튐 5.6% → 2.0%였으나 현장 검증은 못 함.
-
-**코너(검출 약 26%)**: 오른쪽 경계선만 보는 구조라 코너에서 선이 화면 밖으로 휘어 빠진다. 근본 해결은 왼쪽 점선(중앙선)도 같이 쓰는 것(미구현).
-
-**조향/전진이 번갈아 멈칫하는 현상**: 명령(`/cmd_out`)은 끊기지 않았음(40초 전진 100%). 조향 모터(PWM 150, 목표 ±3~4°에서 on/off)와 구동 모터(`th_scale 450` → PWM 81/255) 전력 간섭 가능성.
-수동 모드에서 조향 없이 전진할 때와 조향하며 전진할 때를 비교해 확인하는 것이 아직 안 됨.
-
-**교훈**
-
-- 시험용 노드를 띄우면 PID로 확실히 종료할 것. 시험 노드(`lane_ptest`)가 남아 `/cmd_lane`에 같이 발행해 몇 개 기록이 오염됐다.
-  기록 전에는 `ros2 node list | sort | uniq -c`로 중복 노드가 없는지 확인.
+- 후보 설정은 rosbag에 저장한 영상에 `lane_detect`를 다시 돌려(`scripts/lane_tuning/bag_param_sweep.py`) 먼저 거른 뒤 현장에서 하나만 시험한다.
+- 조건을 완화(`min_slope 0.1`, `right1 200`)하면 주차 박스 가로선을 차선으로 잡아 조향이 ±1000으로 진동했다. `roi_top 280`은 위치가 다르면 검출률이 2%까지 붕괴했다. `th_scale 600`은 이탈.
+- 시험용 노드를 띄우면 PID로 확실히 종료할 것. 남은 시험 노드가 `/cmd_lane`에 같이 발행해 기록이 오염됐다. 기록 전 `ros2 node list | sort | uniq -c`로 중복 확인.
 - `pkill -f <패턴>`은 그 패턴이 들어간 자기 셸 명령까지 죽일 수 있으니 PID로 종료.
 - 한 번에 여러 설정을 바꾸지 말고 기준선에서 하나씩.
-- 허브가 부하에서 반복해서 무너져 카메라/Arduino가 빠졌다. 빠지면 `usb_cam` 노드도 죽으므로 launch를 다시 켤 것.
+- 허브가 부하에서 반복해서 무너져 카메라/Arduino가 빠졌다. 빠지면 `usb_cam`도 죽으므로 launch를 다시 켤 것.
 
 ## 문서/도구 위치 (자세한 내용)
 

@@ -47,13 +47,13 @@ last_metrics = {}
 
 
 def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027,
-                min_slope=0.4, right1=330, right2=640):
+                min_slope=0.4, right1=330, right2=640, roi_top=220):
 
     result_overlay = image.copy()
     mask = color_filter(image)
 
     # 기존 ROI 유지
-    start_point = (100, 220)
+    start_point = (100, roi_top)
     end_point = (640, 450)
     mask_crop = image_crop(mask, start_point, end_point)
     
@@ -160,6 +160,13 @@ class LaneMaskingNode(Node):
         self.min_slope = float(self.get_parameter('min_slope').value)
         self.right1 = int(self.get_parameter('right1').value)
 
+        # 인식 구역 위쪽 경계(px, 클수록 가까운 곳만 봄)와 조향 중앙값 필터 길이(1이면 끔)
+        self.declare_parameter('roi_top', 220, ParameterDescriptor(dynamic_typing=True))
+        self.declare_parameter('steer_filter_n', 1, ParameterDescriptor(dynamic_typing=True))
+        self.roi_top = int(self.get_parameter('roi_top').value)
+        self.steer_filter_n = max(1, int(self.get_parameter('steer_filter_n').value))
+        self.steer_hist = []
+
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
             Image, '/cam_lane/image_raw', self.image_callback, qos_profile_sensor_data)
@@ -179,12 +186,15 @@ class LaneMaskingNode(Node):
             image = cv2.flip(image, 1) # 이미지 반전
             
         result_img, mask_img, steer_rad = lane_detect(image, self.guide_x, self.guide_slope,
-                                                       min_slope=self.min_slope, right1=self.right1)
+                                                       min_slope=self.min_slope, right1=self.right1, roi_top=self.roi_top)
         
         # --- 수정된 로직 ---
         if steer_rad is not None:
             # 새로운 값이 들어왔을 때만 업데이트
-            self.last_steer_rad = steer_rad
+            # 한두 프레임 튀는 값(엉뚱한 선)을 걸러내는 중앙값 필터
+            self.steer_hist.append(float(steer_rad))
+            self.steer_hist = self.steer_hist[-self.steer_filter_n:]
+            self.last_steer_rad = float(np.median(self.steer_hist))
             self.last_detect_t = time.time()
         else:
             # 조향은 마지막 값 유지하되, 차선 없는 상태로 계속 전진하면 위험하니 속도는 멈춤

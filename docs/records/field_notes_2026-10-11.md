@@ -44,13 +44,6 @@ ros2 run s1_stack decision_auto --ros-args -p require_signals:=false
 `s1_stack.launch.py`는 이 파라미터를 넘겨 주지 않는다.
 `ros2 topic pub --once`처럼 한 번만 보낸 입력은 0.5초 뒤 stale이 되므로 `-r 10`으로 계속 발행해야 한다.
 
-## 다음에 할 것
-
-1. 재로그인 후 Arduino/라이다/C920 연결, udev 심볼릭 링크(`/dev/arduino_mega`, `/dev/rplidar`, `/dev/cam_lane`, `/dev/cam_front`) 확인.
-2. `usb_cam`을 `-r __ns:=/cam_lane`으로 띄워 `ros2 topic hz /cam_lane/image_raw` 확인.
-3. STALE이 계속되면 `bash scripts/s1_status.sh`로 끊긴 입력 확인. 어떤 입력을 넣었을 때 났는지 메모.
-4. 10일 노트의 "아직 검증 안 됨" 항목(조향, `sign_detect`, 라이다 노드, 통합 launch) 진행.
-
 ## Arduino USB가 계속 끊기던 문제: 원인은 USB 자동 절전(autosuspend)
 
 증상: Arduino(`/dev/arduino_mega`)가 몇 초마다 USB에서 끊겼다 붙었다 하며
@@ -100,20 +93,3 @@ USB가 순간적으로 끊겨도 노드가 종료되지 않도록 수정(커밋 
 
 `s1_stack/config/s1_stack.yaml`: `th_scale: 200`(기본 1000, 저속 시험용), 조이스틱 축 번호.
 커밋 전에 이 파일은 반드시 제외하거나 원래대로 되돌릴 것.
-
-## 차선 추종 튜닝 (요약)
-
-상세 수식/파라미터/튜닝 순서/개선 설계는 `docs/records/lane_following_guide.md`, 인수인계 요약은 `docs/summary/handoff_2026-10-11.md`를 본다.
-여기에는 현장에서 얻은 교훈만 남긴다.
-
-- 후보 설정은 rosbag에 저장한 영상에 `lane_detect`를 다시 돌려(`scripts/lane_tuning/bag_param_sweep.py`) 먼저 거른 뒤 현장에서 하나만 시험한다.
-- 조건을 완화(`min_slope 0.1`, `right1 200`)하면 주차 박스 가로선을 차선으로 잡아 조향이 ±1000으로 진동했다. `roi_top 280`은 위치가 다르면 검출률이 2%까지 붕괴했다. `th_scale 600`은 이탈.
-- 시험용 노드를 띄우면 PID로 확실히 종료할 것. 남은 시험 노드가 `/cmd_lane`에 같이 발행해 기록이 오염됐다. 기록 전 `ros2 node list | sort | uniq -c`로 중복 확인.
-- `pkill -f <패턴>`은 그 패턴이 들어간 자기 셸 명령까지 죽일 수 있으니 PID로 종료.
-- 한 번에 여러 설정을 바꾸지 말고 기준선에서 하나씩.
-- 허브가 부하에서 반복해서 무너져 카메라/Arduino가 빠졌다. 빠지면 `usb_cam`도 죽으므로 launch를 다시 켤 것.
-
-## 문서/도구 위치 (자세한 내용)
-
-- `docs/records/lane_following_guide.md`: 현재 상태, 조향이 만들어지는 수식/단위, 파라미터 레퍼런스, 튜닝 순서, 앞으로 바꿀 것(점선 병행 설계 포함).
-- `scripts/lane_tuning/`: `calib_pose.py`(기준자세 보정), `bag_summary.py`, `bag_param_sweep.py`, `bag_montage.py`(rosbag 기반 분석).

@@ -171,17 +171,9 @@ Arduino(`Arduino/S1/S1.ino`):
 
 ### 4.1 현재 기준선 (가장 잘 됐던 설정)
 
-```bash
-# 터미널 1: th_scale 450 (s1_stack.yaml) 상태로
-ros2 launch s1_stack s1_stack.launch.py
-# 터미널 2
-ros2 run lane_trace lane_trace --ros-args -p linear_speed:=1.0 -p lost_hold_s:=1.5 -p guide_slope:=0.524 -p guide_x:=531
-# 터미널 3
-ros2 run sign_detect sign_detect --ros-args -p model_path:=$HOME/FMTC_intern/sign_detect/best_0808.pt
-```
-
-모든 터미널에서 먼저 `source /opt/ros/humble/setup.bash && source ~/FMTC_intern/install/setup.bash` (`.bashrc`에 들어 있음).
-`min_slope`, `right1`, `roi_top`, `steer_filter_n`은 **넣지 않는다**(기본값).
+실행 명령은 한 곳에만 둔다: [인수인계 문서](../summary/handoff_2026-10-11.md)의 "지금 가장 잘 됐던 설정으로 돌리는 법".
+핵심은 `lane_trace`에 `linear_speed:=1.0 lost_hold_s:=1.5 guide_slope:=0.524 guide_x:=531`만 주고,
+`min_slope`, `right1`, `roi_top`, `steer_filter_n`은 **넣지 않는 것**(기본값)이다.
 
 ---
 

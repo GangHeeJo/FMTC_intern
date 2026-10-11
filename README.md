@@ -92,7 +92,7 @@ src/
 
 **`serial_sender`**: Sub `/cmd_out` (`Twist`), `/calib/start` (`std_msgs/Empty`) → 시리얼로 `TH:/STN:` 텍스트 전송. 캘리브레이션 명령 수신 시 6초간 0,0 고정.
 
-**`Arduino/S1.ino`**: 시리얼로 `TH:/STN:` 라인을 받아 파싱, 모터 PWM/조향 서보 구동. 신호가 끊기면(타임아웃) 자체 failsafe로 정지.
+**`Arduino/S1/S1.ino`**: 시리얼로 `TH:/STN:` 라인을 받아 파싱, 모터 PWM/조향 서보 구동. 신호가 끊기면(타임아웃) 자체 failsafe로 정지.
 
 ## 빌드 & 실행
 

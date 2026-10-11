@@ -48,3 +48,54 @@ ros2 run s1_stack decision_auto --ros-args -p require_signals:=false
 2. `usb_cam`을 `-r __ns:=/cam_lane`으로 띄워 `ros2 topic hz /cam_lane/image_raw` 확인.
 3. STALE이 계속되면 `bash scripts/s1_status.sh`로 끊긴 입력 확인. 어떤 입력을 넣었을 때 났는지 메모.
 4. 10일 노트의 "아직 검증 안 됨" 항목(조향, `sign_detect`, 라이다 노드, 통합 launch) 진행.
+
+## Arduino USB가 계속 끊기던 문제: 원인은 USB 자동 절전(autosuspend)
+
+증상: Arduino(`/dev/arduino_mega`)가 몇 초마다 USB에서 끊겼다 붙었다 하며
+`usb 3-3.4-port3: disabled by hub (EMI?), re-enabling...`이 반복됨. 이때 `serial_sender`는
+첫 쓰기에서 `write failed: [Errno 5] Input/output error`로 죽음.
+
+- 코드/ModemManager/케이블/배터리 쪽이 아니었음. 노드를 하나도 안 돌려도 끊겼고, 반대로
+  launch로 카메라 스트리밍과 포트 사용 중일 때는 안정적이었음 → 장치가 놀 때 절전으로 들어가는 것이 단서.
+- 확인: `usbcore.autosuspend = 2`(2초), 카메라와 안쪽 허브가 `runtime_status=suspended`.
+- 해결: 자동 절전 끄기. 임시 적용은 아래, 영구 적용은 GRUB 부팅 옵션 `usbcore.autosuspend=-1`.
+
+```bash
+# 임시 (재부팅하면 사라짐)
+sudo sh -c 'echo -1 > /sys/module/usbcore/parameters/autosuspend; for f in /sys/bus/usb/devices/*/power/control; do echo on > $f; done'
+# 영구
+sudo sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 usbcore.autosuspend=-1"/' /etc/default/grub
+sudo update-grub
+```
+
+- 효과: 같은 허브 경유 상태에서 40초 동안 Arduino 재연결 11번 → 0번. 모터 구동 중에도 안 끊김.
+- 새 머신 셋업(`scripts/vm_setup.sh`)에도 이 부팅 옵션을 넣는 것이 안전함.
+- 참고: 끊김 진단 중 USB 허브, 케이블, 직결 여부를 많이 바꿨는데 결과적으로 절전이 주원인이었음.
+  비슷한 증상이면 `dmesg`의 `disabled by hub (EMI?)`와 `/sys/bus/usb/devices/*/power/runtime_status`부터 확인할 것.
+
+## `serial_sender`: 끊겨도 죽지 않고 자동 재연결
+
+USB가 순간적으로 끊겨도 노드가 종료되지 않도록 수정(커밋 `4e1f625`). 끊기면 전송을 멈추고(정지 유지)
+1초마다 재연결을 시도하며, 재연결 직후 Arduino 부팅 시간(2초)은 전송하지 않음. 이전 명령은 재전송하지 않음.
+포트를 열면 Arduino가 리셋되므로 launch 직후 약 10초는 기다린 뒤 조작할 것.
+
+## 조이스틱 (Xbox Series 컨트롤러, USB 유선)
+
+- 버튼: 0=A(자동), 1=B(수동), 2=X, 3=**Y(정지)**. README에는 X가 정지로 적혀 있으나 설정(`btn_stop: 3`)은 Y임.
+- 축: 왼쪽 스틱 상하=1, 좌우=0, 오른쪽 스틱 상하=4, 좌우=3. 기본 설정(`axis_drive: 3`)은 다른 컨트롤러 기준이라
+  이 컨트롤러에서는 로컬에서 `axis_steer: 3`(오른쪽 스틱 좌우), `axis_drive: 1`(왼쪽 스틱 상하)로 바꿔 사용.
+  이 변경은 컨트롤러 의존적이라 커밋하지 않음.
+- `cmd_mux`는 STOP으로 시작하며 조이스틱 버튼을 눌러야 모드가 바뀜. 정지 후 스틱은 무시됨.
+
+## 이 노트북(Samsung 940XHA, Lunar Lake)의 제약
+
+- **블루투스와 Wi-Fi가 동작하지 않음**: 내장 칩(BT `8087:0037`, Wi-Fi `8086:a840`)에 커널 `6.8.0-138` 드라이버가
+  붙지 않아 `hci0`/`wlan`이 없음. 인터넷은 iPhone USB 테더링으로 해결. 조이스틱은 유선(USB-C)만 가능.
+- 포트가 부족함: USB-A 1개(허브), USB-C 2개(충전기/테더링/조이스틱 등 공유).
+  충전 중인 USB-C 포트는 데이터 호스트로 동작하지 않음(`/sys/class/typec/port*/data_role`로 확인 가능).
+  C→A 변환 어댑터가 인식되지 않는 경우가 있었으니(`partner=0`), 안 되면 다른 어댑터를 쓸 것.
+
+## 테스트용 임시 설정 (로컬에만 있고 커밋하지 않음)
+
+`s1_stack/config/s1_stack.yaml`: `th_scale: 200`(기본 1000, 저속 시험용), 조이스틱 축 번호.
+커밋 전에 이 파일은 반드시 제외하거나 원래대로 되돌릴 것.

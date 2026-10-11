@@ -175,6 +175,10 @@ class LaneMaskingNode(Node):
         
         # 현재(또는 유지된) 조향값 사용
         current_steer = self.last_steer_rad
+        # lost_hold_s를 쓰는 경우, 그 시간 넘게 차선을 못 보면 마지막 조향(최대치일 수 있음)을 버리고 중앙으로
+        if (self.lost_hold_s > 0.0 and steer_rad is None
+                and (self.last_detect_t is None or time.time() - self.last_detect_t > self.lost_hold_s)):
+            current_steer = 0.0
         # -----------------        
         
         # --- [추가] 조향 부호 반전 로직 ---

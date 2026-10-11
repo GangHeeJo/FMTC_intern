@@ -204,6 +204,8 @@ python3 scripts/lane_tuning/bag_summary.py /tmp/bagN           # 2초 단위 표
 python3 scripts/lane_tuning/bag_montage.py /tmp/bagN /tmp/m.png 8 22 31 34   # 장면 확인
 ```
 
+용량 참고: 영상(`/cam_lane/image_raw`)을 포함한 60초 기록은 약 **1.1~1.6GB**다. 영상 없이 제어 토픽만 기록하면 훨씬 가볍다(그 경우 `bag_montage.py`, `bag_param_sweep.py`는 쓸 수 없고 `bag_summary.py`만 동작).
+
 `bag_summary` 읽는 법:
 - `lane 전진%`가 낮다 → 차선을 놓치는 중. 영상(`bag_montage`)으로 이유를 본다.
 - `out 전진%`가 `lane 전진%`보다 훨씬 낮다 → `cmd_mux`/`decision_auto`가 막는 중(모드, STALE).

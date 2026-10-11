@@ -16,6 +16,18 @@
 
 각자 자기 브랜치에서 작업 후 `main`에 push. `s1_stack`의 `decision_auto.py`/`cmd_mux.py`/`s1_stack.yaml`/`s1_stack.launch.py`처럼 여럿이 겹치는 파일을 건드릴 땐 미리 공유하기. 실차로 테스트하는 날엔 `main`을 건드리지 않기(빌드 깨지면 그 자리에서 다 같이 막힘).
 
+## 문서 작성 규칙
+
+현장 검증/디버깅 내용은 날짜별로 아래 형식으로 남긴다 (`docs/summary/handoff_2026-10-11.md` + `docs/records/field_notes_2026-10-11.md` 참고):
+
+| 위치 | 용도 |
+|---|---|
+| `docs/summary/handoff_<날짜>.md` | **팀원이 먼저 읽을 한 장 요약** — 연결 방법, 실행 명령, 현재 상태, 우선순위 |
+| `docs/records/field_notes_<날짜>.md` | 상세 기록 — 겪은 문제·원인·조치, 커밋/로컬/시스템 반영 상태 |
+| `docs/records/<주제>_guide.md` | 특정 기능(예: 차선 추종) 튜닝/구조 가이드. 날짜에 안 묶임 |
+
+summary 문서 맨 앞에서 해당 records 문서로 링크하고, README 맨 위는 **가장 최근 summary 하나만** 가리키면 된다.
+
 ## 패키지 구조
 
 ```

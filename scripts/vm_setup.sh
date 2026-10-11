@@ -49,5 +49,19 @@ sudo cp udev/99-robot.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
+echo "=== 9. (선택) 네이티브 실차 머신: USB 자동 절전 끄기 ==="
+# Arduino/허브가 몇 초마다 끊기는 원인이 USB 자동 절전(autosuspend)이었음. NATIVE=1 bash vm_setup.sh 로 실행하면 적용.
+if [ "${NATIVE:-0}" = "1" ]; then
+  if ! grep -q "usbcore.autosuspend=-1" /etc/default/grub; then
+    sudo sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 usbcore.autosuspend=-1"/' /etc/default/grub
+    sudo update-grub
+    echo "적용됨. 재부팅해야 완전히 반영됩니다."
+  else
+    echo "이미 적용되어 있음"
+  fi
+else
+  echo "건너뜀 (VM이면 필요 없음. 실차 노트북이면 NATIVE=1 로 실행)"
+fi
+
 echo "=== DONE ==="
 echo "터미널 새로 열거나 'source ~/.bashrc' 하면 바로 ros2 명령 사용 가능"

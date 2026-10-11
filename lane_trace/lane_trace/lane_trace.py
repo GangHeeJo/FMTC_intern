@@ -46,7 +46,8 @@ def auto_canny(image, sigma=0.33):
 last_metrics = {}
 
 
-def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027):
+def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027,
+                min_slope=0.4, right1=330, right2=640):
 
     result_overlay = image.copy()
     mask = color_filter(image)
@@ -66,7 +67,6 @@ def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027):
     
     # 관심 영역 상수 (기존 유지)
     m, n, k = 0.3, (620, 380), 700
-    right1, right2 = 330, 640
     
     # 필터링용 사선 및 수직선 (빨간색)
     cross_x = n[0] - k
@@ -90,7 +90,7 @@ def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027):
             # ROI 필터링: m_2(우측 상단 대각선) 조건을 제거하여 영역을 확장함
             if ((midpoint[0] > right1) and (midpoint[0] < right2) and 
                 (m * (midpoint[0] - n[0]) + (n[1] - midpoint[1]) > 0) and 
-                abs(slope) > 0.4):
+                abs(slope) > min_slope):
                 filtered_points.append((x1, y1))
                 filtered_points.append((x2, y2))
                 cv2.line(result_overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -154,6 +154,12 @@ class LaneMaskingNode(Node):
         self.guide_x = float(self.get_parameter('guide_x').value)
         self.guide_slope = float(self.get_parameter('guide_slope').value)
 
+        # 차선 후보로 인정하는 조건: 선의 최소 기울기, 인식 구역 왼쪽 경계(px). 코너에서 휜 선을 잡으려면 낮춤
+        self.declare_parameter('min_slope', 0.4, ParameterDescriptor(dynamic_typing=True))
+        self.declare_parameter('right1', 330, ParameterDescriptor(dynamic_typing=True))
+        self.min_slope = float(self.get_parameter('min_slope').value)
+        self.right1 = int(self.get_parameter('right1').value)
+
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
             Image, '/cam_lane/image_raw', self.image_callback, qos_profile_sensor_data)
@@ -172,7 +178,8 @@ class LaneMaskingNode(Node):
         if self.lane_change_flag is True:
             image = cv2.flip(image, 1) # 이미지 반전
             
-        result_img, mask_img, steer_rad = lane_detect(image, self.guide_x, self.guide_slope)
+        result_img, mask_img, steer_rad = lane_detect(image, self.guide_x, self.guide_slope,
+                                                       min_slope=self.min_slope, right1=self.right1)
         
         # --- 수정된 로직 ---
         if steer_rad is not None:

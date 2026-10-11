@@ -1,5 +1,7 @@
 # S1 자율주행차 (FMTC)
 
+> **10/11 실차 검증 결과와 앞으로 할 일은 [docs/summary/handoff_2026-10-11.md](docs/summary/handoff_2026-10-11.md) 한 장만 먼저 읽으세요.** 나머지 문서는 거기서 링크됩니다.
+
 서울대학교 FMTC에서 운영하는 1/10 스케일 자율주행 RC카 "S1"의 ROS2(humble) 소프트웨어 스택. 카메라(차선/표지판 인식), 라이다(장애물 회피), 조이스틱/아두이노 제어를 통합해 차선 추종 + 신호등/횡단보도 정지 + 장애물 회피 자율주행을 수행한다.
 
 제3회 미래형자동차 자율주행 SW경진대회(서울대 "두돈반" 팀) 출품 코드가 원형이며, 당시 ROS1 버전은 저장소 루트의 결과보고서 PDF에 부록 코드로 남아있다. 지금 이 저장소는 ROS2로 재구현된 버전이고, 처음부터 `rclpy` 기반으로 작성되어 ROS1→ROS2 전환 작업은 필요 없다 (rosserial도 쓴 적 없이 자체 시리얼 프로토콜로 시작함).
@@ -13,6 +15,18 @@
 | 도경윤 | 제어·통신 | `s1_stack`, `Arduino/S1` | `gyungyoon` |
 
 각자 자기 브랜치에서 작업 후 `main`에 push. `s1_stack`의 `decision_auto.py`/`cmd_mux.py`/`s1_stack.yaml`/`s1_stack.launch.py`처럼 여럿이 겹치는 파일을 건드릴 땐 미리 공유하기. 실차로 테스트하는 날엔 `main`을 건드리지 않기(빌드 깨지면 그 자리에서 다 같이 막힘).
+
+## 문서 작성 규칙
+
+현장 검증/디버깅 내용은 날짜별로 아래 형식으로 남긴다 (`docs/summary/handoff_2026-10-11.md` + `docs/records/field_notes_2026-10-11.md` 참고):
+
+| 위치 | 용도 |
+|---|---|
+| `docs/summary/handoff_<날짜>.md` | **팀원이 먼저 읽을 한 장 요약** — 연결 방법, 실행 명령, 현재 상태, 우선순위 |
+| `docs/records/field_notes_<날짜>.md` | 상세 기록 — 겪은 문제·원인·조치, 커밋/로컬/시스템 반영 상태 |
+| `docs/records/<주제>_guide.md` | 특정 기능(예: 차선 추종) 튜닝/구조 가이드. 날짜에 안 묶임 |
+
+summary 문서 맨 앞에서 해당 records 문서로 링크하고, README 맨 위는 **가장 최근 summary 하나만** 가리키면 된다.
 
 ## 패키지 구조
 
@@ -41,7 +55,7 @@ src/
 ```
 
 - `decision_auto`: 장애물 회피(0.2s 이내 수신 시 최우선) → 신호등/횡단보도 정지 → 평상시 차선 추종, 순으로 `/cmd_auto` 하나로 병합.
-- `cmd_mux`: 조이스틱 버튼(A=자동, B=수동, X=정지)으로 모드 전환, 자동/수동 명령에 타임아웃 적용해 신호 끊기면 자동 정지(failsafe).
+- `cmd_mux`: 조이스틱 버튼(A=자동, B=수동, **Y=정지**, Xbox 컨트롤러 기준 `btn_stop: 3`)으로 모드 전환, 자동/수동 명령에 타임아웃 적용해 신호 끊기면 자동 정지(failsafe).
 - `serial_sender`: `geometry_msgs/Twist`를 `"TH:<-1000..1000> STN:<-1000..1000>"` 텍스트 라인으로 변환해 시리얼로 전송. rosserial 아님, 자체 프로토콜.
 
 ## 패키지별 토픽 & 동작 상세
@@ -90,7 +104,7 @@ src/
 
 **`serial_sender`**: Sub `/cmd_out` (`Twist`), `/calib/start` (`std_msgs/Empty`) → 시리얼로 `TH:/STN:` 텍스트 전송. 캘리브레이션 명령 수신 시 6초간 0,0 고정.
 
-**`Arduino/S1.ino`**: 시리얼로 `TH:/STN:` 라인을 받아 파싱, 모터 PWM/조향 서보 구동. 신호가 끊기면(타임아웃) 자체 failsafe로 정지.
+**`Arduino/S1/S1.ino`**: 시리얼로 `TH:/STN:` 라인을 받아 파싱, 모터 PWM/조향 서보 구동. 신호가 끊기면(타임아웃) 자체 failsafe로 정지.
 
 ## 빌드 & 실행
 
@@ -112,12 +126,12 @@ ros2 run sign_detect sign_detect --ros-args -p model_path:=/절대/경로/best_0
 ## 알려진 이슈 / 확인 필요 (2026-10 기준)
 
 - `lane_trace`는 현재 **오른쪽 차선만** 검출함. 보고서 PDF의 예전 ROS1 버전은 좌/우 양쪽 차선 + `check_pixel_color` 색 검증까지 있었는데, ROS2로 옮기면서 빠짐 — 의도적 단순화인지 확인 필요.
-- `usb_cam`, `cv_bridge`가 humble용으로 실제 설치돼있는지, `numpy<2.0` 고정이 유지되는지(README 참고) 검증 차량에서 확인 필요.
+- `usb_cam`, `cv_bridge`가 humble용으로 실제 설치돼있는지, `numpy<2.0` 고정이 유지되는지(README 참고) 검증 차량에서 확인 필요. → **2026-10-11 네이티브 Ubuntu 22.04에서 설치·동작 확인됨.**
 - `lane_trace`의 ROI/HLS 임계값은 특정 조도 기준 튜닝값 — 10월 검증 트랙(4층 로비) 조명에 맞게 재조정 필요할 수 있음.
 - **DBSCAN 라이다 클러스터링 미구현**: 공식 목표 아키텍처(2026-10-08 공유된 구조도)와 예전 ROS1 코드(결과보고서 PDF)엔 `sklearn.cluster.DBSCAN` 기반 장애물 클러스터링이 있는데, 현재 `obs_evade`/`gap_follow`/`wall_follow`는 전부 단순 ROI/gap 거리 임계값 방식임. 김민준 담당 파트.
 - **주차(parking) 기능 전체가 없음**: HW엔 주차용 초음파센서(HC-SR04 ×2)가 있고 목표 구조도에도 주차 탐색/후진 주차 상태(S4~S5)가 있는데, 현재 repo엔 초음파 관련 노드/토픽이 아예 없음.
 - 목표 구조도는 아두이노 통신을 "rosserial"로 표기하고 토픽 이름도 다름(`/camera/lane_image_raw`, `/cluster_info` 등) — 현재 repo의 자체 시리얼 프로토콜/토픽 이름과 다르지만 기능상 문제는 아님, 다이어그램 보고 그대로 새로 짜지 않도록 주의.
-- 공식 HW 매뉴얼(2026-07-06) 기준 실제 차량 제어 PC는 **Ubuntu 20.04 + ROS1(Noetic)** — 이 repo(ROS2 humble)는 아직 실차에 올라간 적 없음. 검증 전에 Ubuntu 22.04+humble(또는 Docker) 올리는 작업이 선행되어야 함.
+- 공식 HW 매뉴얼(2026-07-06) 기준 실제 차량 제어 PC는 **Ubuntu 20.04 + ROS1(Noetic)** — 이 repo(ROS2 humble)는 아직 실차에 올라간 적 없음. 검증 전에 Ubuntu 22.04+humble(또는 Docker) 올리는 작업이 선행되어야 함. → **2026-10-11에 네이티브 Ubuntu 22.04에서 실차 하드웨어로 자동 주행 체인이 검증됨** ([인수인계](docs/summary/handoff_2026-10-11.md)).
 
 ## WSL2(Ubuntu 22.04)로 검증할 때 꼭 필요한 설정
 

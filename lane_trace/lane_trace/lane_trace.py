@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import qos_profile_sensor_data
 import numpy as np
 import time
@@ -140,16 +141,16 @@ class LaneMaskingNode(Node):
         self.debug_view = self.get_parameter('debug_view').get_parameter_value().bool_value
 
         # 차선 추종 시 전진 속도(linear.x, 0~1). serial_sender의 th_scale과 곱해져 실제 TH가 됨
-        self.declare_parameter('linear_speed', 0.5)
+        self.declare_parameter('linear_speed', 0.5, ParameterDescriptor(dynamic_typing=True))
         self.linear_speed = float(self.get_parameter('linear_speed').value)
         # 차선을 놓친 직후 이 시간(초) 동안은 마지막 조향으로 계속 전진. 0이면 놓치는 즉시 정지(기존 동작)
-        self.declare_parameter('lost_hold_s', 0.0)
+        self.declare_parameter('lost_hold_s', 0.0, ParameterDescriptor(dynamic_typing=True))
         self.lost_hold_s = float(self.get_parameter('lost_hold_s').value)
         self.last_detect_t = None
 
         # 조향 기준값: 차를 원하는 위치/방향에 놓았을 때 측정한 선의 위치(px)와 기울기(rad)
-        self.declare_parameter('guide_x', 550.0)
-        self.declare_parameter('guide_slope', 1.11)
+        self.declare_parameter('guide_x', 550.0, ParameterDescriptor(dynamic_typing=True))
+        self.declare_parameter('guide_slope', 1.11, ParameterDescriptor(dynamic_typing=True))
         self.guide_x = float(self.get_parameter('guide_x').value)
         self.guide_slope = float(self.get_parameter('guide_slope').value)
 

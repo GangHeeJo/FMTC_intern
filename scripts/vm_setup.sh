@@ -27,7 +27,7 @@ echo "=== 5. python packages (setuptools pin to avoid colcon build breakage) ===
 pip install --no-cache-dir ultralytics torch torchvision
 pip install "setuptools==58.2.0"
 pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
-pip install "numpy<2.0" pyserial
+pip install "numpy<2.0" pyserial scikit-learn
 
 echo "=== 6. .bashrc env ==="
 grep -qxF "source /opt/ros/humble/setup.bash" ~/.bashrc || echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc

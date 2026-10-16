@@ -10,6 +10,30 @@ test_traffic_decision.py의 장애물 회피 부분)을 ROS2로 포팅.
   TH:/STN:) -> 회전 명령은 Twist(linear.x/angular.z)로 발행.
 - 3개 노드(cluster_pub/lanechange_flag/traffic_decision)로 나뉘어 있던 것을
   이 repo의 기존 obs_evade.py 관례대로 단일 노드로 합침.
+
+=== 실행 전 꼭 확인 ===
+1. `pip install scikit-learn` 안 깔려있으면 이 노드만 import 에러로 죽음
+   (나머지 노드는 정상 작동 - launch 전체가 멈추지는 않음).
+2. 장애물 없으면 /cmd_obs를 아예 발행 안 함 -> decision_auto가 0.2s 뒤
+   자동으로 차선 추종으로 복귀. 그래서 라이다가 없거나 장애물이 없어도
+   평소 주행에는 영향 없음. 즉, 이 노드 때문에 차가 안 움직이는 일은 없음.
+
+=== 미검증 (실제 라이다로 한 번도 안 테스트해봄, 전부 ROS1 기본값을 그대로 가져온 것) ===
+- eps/min_samples/거리 임계값(threshold_*): ROS1의 RPLIDAR A2M8 환경 기준값.
+  이 차의 라이다 장착 위치/각도가 다르면 하나도 안 맞을 수 있음. 장애물을 실제로
+  놔두고 로그(아래 self.get_logger().warn 부분)에 'Obstacle confirmed!'가
+  찍히는지부터 확인할 것. 안 찍히면 eps_short_m/min_samples_short부터 낮춰볼 것.
+- min_quality(기본 0=미사용): sllidar_ros2가 LaserScan.intensities를 실제로
+  채워주는지 이 하드웨어에서 확인 안 됨. 0으로 두면 품질 필터링 없이 거리/개수만
+  보고 판단함 - 바닥/벽을 장애물로 오인할 수 있음.
+- '전방 = x가 음수' 가정(ROI/각도 계산 전부 이 가정 위에 있음): 라이다 장착
+  방향이 바뀌면 이 가정부터 깨짐. `ros2 topic echo /scan`으로 전방 물체가
+  어느 x/y로 찍히는지 먼저 확인하고 안 맞으면 obstacle_min_dist_m 등 조건의
+  부호를 다시 봐야 함.
+- 좌/우 회전 시간 공식(left_time_base_s, right_time_base_s, time_y_coeff): ROS1
+  차량의 속도/바퀴 간격 기준 경험값. 이 차에서는 옆 차선으로 못 가거나 너무
+  많이 돌아갈 수 있음 - maneuver_speed_scale/시간 값을 낮춰서 먼저 반응만
+  확인한 뒤 늘릴 것.
 """
 
 import rclpy
@@ -143,6 +167,8 @@ class ObstacleEvasionNode(Node):
 
         valid = (ranges > 0.1) & (ranges < self.threshold_far) & np.isfinite(ranges)
         if self.min_quality > 0 and len(msg.intensities) == len(ranges):
+            # 주의: sllidar_ros2가 intensities를 실제로 채워주는지 미확인.
+            # 0(기본값) 쓸 거면 이 if는 그냥 안 타니 무시해도 됨.
             valid &= np.array(msg.intensities) >= self.min_quality
 
         ranges, angles = ranges[valid], angles[valid]
@@ -159,6 +185,9 @@ class ObstacleEvasionNode(Node):
         clusters += self._cluster_range(x[far_idx], y[far_idx], self.eps_far, self.min_samples_far)
 
         obstacle_detected = False
+        # 아래 로직 전체가 "전방 = x가 음수" 가정 위에 있음(기존 obs_evade.py ROI와 동일 가정).
+        # 라이다 장착 방향이 바뀌면 여기부터 다시 봐야 함 - ros2 topic echo /scan으로
+        # 전방 물체의 실제 x,y 부호 먼저 확인할 것.
         for (cx, cy), num in clusters:
             dist = float(np.hypot(cx, cy))
             if not (self.obstacle_min_dist <= dist <= self.obstacle_max_dist):
@@ -203,6 +232,10 @@ class ObstacleEvasionNode(Node):
     # ---------- 회피 기동 ----------
 
     def _start_maneuver(self, y_coord):
+        # 아래 시간 공식은 ROS1 차량(다른 속도/바퀴간격)에서 나온 경험값 그대로임.
+        # 처음 테스트할 땐 maneuver_speed_scale을 낮춰서(예: 0.3) 반응만 보고,
+        # 옆 차선까지 못 가거나 너무 많이 돌면 left_time_base_s/right_time_base_s를
+        # 조정할 것. 바퀴 띄우고 먼저 해볼 것 - 그대로 돌리면 세게 꺾일 수 있음.
         if self.lane_state == 'LANE2':
             # 원래 차선 -> 좌회전해서 옆 차선으로
             self.maneuver_dir = 1.0

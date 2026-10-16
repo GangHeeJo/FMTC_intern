@@ -52,6 +52,12 @@ def generate_launch_description():
             parameters=[params],
         ),
         Node(
+            package='obs_evade',
+            executable='obs_evade',
+            name='obs_evade',
+            output='screen',
+        ),
+        Node(
             package='usb_cam',
             executable='usb_cam_node_exe',
             name='usb_cam_lane',

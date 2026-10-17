@@ -50,6 +50,8 @@ def main():
                 img = np.frombuffer(bytes(m.data), np.uint8).reshape(m.height, m.width, -1)
                 if m.encoding == "rgb8":
                     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                if img.shape[1] != 640 or img.shape[0] != 480:  # lane_trace와 같게 640x480 좌표로 맞춤(320x240 bag)
+                    img = cv2.resize(img, (640, 480), interpolation=cv2.INTER_LINEAR)
                 ov, _mask, steer = lt.lane_detect(img, **kw)
                 label = f"t={w:.0f}s " + ("NO LANE" if steer is None else f"z={-steer * 2500:+.0f}")
                 cv2.putText(ov, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)

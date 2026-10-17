@@ -48,6 +48,8 @@ def load_frames(bag, lo, hi, step):
         a = np.frombuffer(bytes(m.data), np.uint8).reshape(m.height, m.width, -1)
         if m.encoding == "rgb8":
             a = cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
+        if a.shape[1] != 640 or a.shape[0] != 480:  # lane_trace와 같게 640x480 좌표로 맞춤
+            a = cv2.resize(a, (640, 480), interpolation=cv2.INTER_LINEAR)
         frames.append(a)
     return frames
 

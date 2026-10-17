@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--sec", type=float, default=5.0)
     ap.add_argument("--topic", default="/cam_lane/image_raw")
     ap.add_argument("--save", default="", help="마지막 프레임의 인식 결과(overlay)를 저장할 경로")
+    ap.add_argument("--l_min", type=int, default=100, help="lane_trace의 l_min과 같게")
+    ap.add_argument("--s_max", type=int, default=255, help="lane_trace의 s_max와 같게")
     a = ap.parse_args()
 
     rclpy.init()
@@ -40,7 +42,9 @@ def main():
 
     def cb(msg):
         img = bridge.imgmsg_to_cv2(msg, "bgr8")
-        overlay, _mask, steer = lt.lane_detect(img)  # 기본 기준값으로 호출, 측정값(last_metrics)만 사용
+        if img.shape[1] != 640 or img.shape[0] != 480:  # lane_trace와 같게 640x480 좌표로 맞춤
+            img = cv2.resize(img, (640, 480), interpolation=cv2.INTER_LINEAR)
+        overlay, _mask, steer = lt.lane_detect(img, l_min=a.l_min, s_max=a.s_max)  # 기본 기준값으로 호출, 측정값(last_metrics)만 사용
         last["overlay"] = overlay
         rows.append((lt.last_metrics["slope_avg"], lt.last_metrics["x_value"])
                     if steer is not None and lt.last_metrics else None)

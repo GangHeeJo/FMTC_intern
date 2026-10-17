@@ -1,0 +1,69 @@
+# 장애물 회피(차선 변경) 시험 설정 — 10/17 18차에서 전체 순서 성공한 값 (도경윤)
+# 실행:
+#   taskset -c 0-5 ros2 run lane_trace lane_trace --ros-args --params-file <이 파일>
+#   taskset -c 0-5 ros2 run obs_evade obs_evade --ros-args --params-file <이 파일>   # 차를 출발 위치에 놓은 뒤 띄울 것(출발 차선 자동 판단)
+# sign_detect는 CPU 6~11번 코어(taskset -c 6-11)에 따로 띄움. 나머지는 0~5번으로 나눠 서로 밀리지 않게 함.
+#
+# 시간 값(cam_*_s, straighten_*_s)은 차선 변경 중 속도(obs_evade max_speed x change_speed = 0.7)에서 맞춘 것.
+# 그 속도를 바꾸면 이 시간들도 다시 맞춰야 함. lane_trace 주행 속도(linear_speed)만 바꾸는 것은 영향 없음.
+
+lane_masking_node:            # lane_trace 노드 이름
+  ros__parameters:
+    linear_speed: 0.7
+    # 2차선(실선) 추종
+    guide_x: 404
+    guide_slope: 0.70
+    b_rad: 0.005
+    right1: 270
+    lost_hold_s: 1.5
+    min_detect_ratio: 0.3
+    detect_window_s: 1.0
+    detector: 2             # 2차선 주행도 모양 기반 검출. 상자 옆 구간에서 방식 1은 바깥 선을 잡음(10/17 전체시험)
+    guide_x_v2: 384         # 방식 2용 2차선 기준값(방식 1의 404/0.70과 같은 조향이 나오게 맞춤)
+    guide_slope_v2: 0.73
+    detector_change: 1      # 차선 변경 중에는 방식 1 (obs_evade 시간 값이 이 기준)
+    # 흰 선 조건
+    l_min: 130
+    s_max: 30               # 흰 선 채도 상한. 밤 조명에서 점선이 채도 22로 찍혀 20이면 통째로 걸러짐(10/17 22:40). 녹색 잔디는 35~40이라 30도 걸러짐
+    open_k: 13              # 주차선(가는 선) 제거. 9면 주차 칸 세로선을 점선으로 착각(10/17 7·8차)
+    # 1차선(점선) 추종
+    guide_x_l1: 400.0
+    guide_slope_l1: 0.728
+    b_rad_l1: 0.0055
+    right2_l1: 440
+    roi_top_l1: 100
+    min_detect_ratio_l1: 0.0
+    lost_hold_s_l1: 4.0
+    hold_steer_max_deg_l1: 12.0
+    max_blob_l1: 10000
+    detector_l1: 2          # 1차선 주행은 모양 기반 검출(lane_detect_v2)
+    # 차선 변경 중 새 선 찾기
+    roi_top_change: 160     # 2→1
+    min_slope_change: 0.1
+    min_slope_change_l2: 0.1  # 1→2 (roi_top_change_l2는 roi_top_change와 같음)
+
+obs_evade:
+  ros__parameters:
+    mode: toggle
+    start_lane: 0           # 0 = 출발 차선 자동 판단(실선 길이 > 450px면 2차선)
+    roi_near: 1.3
+    roi_far: 1.45
+    # 2차선 → 1차선
+    cam_min_s_l1: 3.0
+    cam_max_s_l1: 8.0
+    cam_cross_s_l1: 1.5
+    straighten_tol_l1: 0.3
+    straighten_max_s_l1: 5.0
+    # 1차선 → 2차선
+    cam_min_s_l2: 6.0       # 우회전이 끝나기 전에 보이는 선은 이전 점선(10/17 6·15차)
+    cam_max_s_l2: 10.0
+    cam_turn_max_s_l2: 6.0  # 6초만 우회전한 뒤 직진하며 경계선을 찾음
+    cam_cross_s_l2: 4.0     # 경계선을 찾은 뒤 직진. 3.5 이하면 2차선에 덜 들어감(17차)
+    straighten_tol_l2: 0.12
+    straighten_max_s_l2: 8.0
+
+decision_auto:
+  ros__parameters:
+    # 장애물 시험 동안만 false: sign_detect가 1~3초씩 밀리면 차가 서서 시간 기준 차선 변경이 흔들림(10/17 16차).
+    # 시합 설정으로 쓰지 말 것(신호등·횡단보도 정지가 꺼짐)
+    require_signals: false

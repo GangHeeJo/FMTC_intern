@@ -22,7 +22,7 @@ class CmdMux(Node):
 
         self.declare_parameter('btn_auto', 0)      # A
         self.declare_parameter('btn_manual', 1)    # B
-        self.declare_parameter('btn_stop', 3)      # X
+        self.declare_parameter('btn_stop', 3)      # Y (Xbox 패드에서 3번 = Y, 10/17 확인. X는 2번)
         self.declare_parameter('initial_mode', MODE_STOP)
         self.declare_parameter('manual_timeout_s', 0.5)
         self.declare_parameter('auto_timeout_s', 0.3)

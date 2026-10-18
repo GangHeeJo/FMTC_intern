@@ -1,8 +1,6 @@
 # S1 자율주행차 (FMTC)
 
-> ⚠️ **실행은 `main`이 아니라 `ganghee` 브랜치에서 하세요.** `main`은 각자 브랜치 작업을 모으는 용도라 최신 실행 코드가 없습니다. 먼저 `git checkout ganghee` (또는 클론 시 `git clone ... && git checkout ganghee`).
->
-> **최신 실차 결과(10/17 장애물 차선 변경 완성, `gyungyoon` 브랜치)와 실행 명령은 [docs/summary/handoff_2026-10-17.md](docs/summary/handoff_2026-10-17.md) 한 장만 먼저 읽으세요.** 연결 방법은 [10/11 인수인계](docs/summary/handoff_2026-10-11.md)에 있습니다. 아래 "빌드 & 실행"은 코드 구조 설명용이고, 실제 실행 명령(터미널 3개, 파라미터 값 등)은 그 문서에 있습니다.
+> `main`은 2026-10-18에 `gyungyoon` 브랜치의 10/17 실차 검증 결과(장애물 2개 차선 변경 완성, 신호등/횡단보도 정지)로 동기화됨. 최신 상태와 실행 명령은 [docs/summary/handoff_2026-10-17.md](docs/summary/handoff_2026-10-17.md) 한 장만 먼저 읽으세요. 아래 "빌드 & 실행"은 코드 구조 설명용이고, 실제 실행 명령(터미널 순서, 파라미터 값 등)은 그 문서에 있습니다.
 
 서울대학교 FMTC에서 운영하는 1/10 스케일 자율주행 RC카 "S1"의 ROS2(humble) 소프트웨어 스택. 카메라(차선/표지판 인식), 라이다(장애물 회피), 조이스틱/아두이노 제어를 통합해 차선 추종 + 신호등/횡단보도 정지 + 장애물 회피 자율주행을 수행한다.
 
@@ -65,12 +63,12 @@ src/
 ### 카메라
 
 **`lane_trace`** (node: `lane_masking_node`)
-- Sub: `/cam_lane/image_raw` (`sensor_msgs/Image`), `/lane_change_flag` (`std_msgs/Bool`)
-- Pub: `/cmd_lane` (`geometry_msgs/Twist`)
-- HLS 색공간에서 흰색만 필터링 → ROI 크롭 → auto-Canny → `HoughLinesP`로 직선 검출 → 기울기/위치로 필터링한 점들을 1차 함수로 피팅해 조향각 계산. **현재 오른쪽 차선만 봄** (ROI `right1=330~right2=640`), 좌측 로직 없음.
-- `lane_change_flag`가 True면 (장애물 회피로 반대 차선으로 넘어간 상태) 이미지를 좌우 반전해서 같은 로직을 재사용하고, 조향값도 반전해서 발행.
-- 차선 미검출 프레임에는 직전 조향값(`last_steer_rad`)을 그대로 유지해 발행 (뚝뚝 끊기는 조향 방지).
-- 속도는 `linear.x = 0.5` 고정, 조향은 rad→`angular.z`(-1000~1000 스케일)로 변환.
+- Sub: `/cam_lane/image_raw` (`sensor_msgs/Image`), `/lane_change_flag`·`/lane_changing` (`std_msgs/Bool`)
+- Pub: `/cmd_lane` (`Twist`), `/lane_detected` (`Bool`), `/lane_slope`·`/lane_line_len` (`Float32`) — 뒤 셋은 `obs_evade`가 차선 변경 완료/출발 차선 판단에 씀
+- 검출 방식 2개(`detector` 파라미터): 방식 1(기존, HLS 필터 → Canny → `HoughLinesP`), 방식 2(`lane_detect_v2`, 흰 덩어리의 굵기·길이·채움비·볼록도로 점선/실선/주차선/흰 차를 구분). 2·1차선 각각 `detector`/`detector_l1`로 따로 고를 수 있음. **항상 오른쪽(2차선 실선 또는 1차선 점선) 한쪽만 봄**, 좌측 차선 로직 없음.
+- `lane_change_flag`가 True면 1차선 기준값(`guide_x_l1` 등)으로 전환해 같은 오른쪽 점선을 계속 따라감 — 과거처럼 이미지를 반전해서 보는 방식은 `flip_on_lane_change`(기본 꺼짐)로만 남아있음.
+- 차선 미검출 프레임에는 `lost_hold_s`(차선별로 다를 수 있음) 동안 직전 조향값을 유지, 그 이상 못 보면 중앙으로 복귀. 최근 구간 검출률이 `min_detect_ratio` 미만이면 정지.
+- 속도는 `linear_speed` 파라미터(기본 0.5), 조향은 rad→`angular.z`(-1000~1000 스케일)로 변환.
 
 **`sign_detect`** (node: `sign_detect`)
 - Sub: `/cam_front/image_raw` (`sensor_msgs/Image`)
@@ -81,11 +79,12 @@ src/
 
 ### 라이다 / 장애물 회피
 
-**`obs_evade`** (실제 실행 파일은 `obs_evade.py`, entry point 기준. `obs_evade2.py`는 좌우 번갈아 회피하는 개선판 초안인데 아직 `setup.py`에 연결 안 돼있어서 `ros2 run`으로는 안 돌아감 — 둘 중 뭘 쓸지 확인 필요)
-- Sub: `/scan` (`sensor_msgs/LaserScan`)
-- Pub: `/cmd_obs` (`geometry_msgs/Twist`), `lane_change_flag` → `/lane_change_flag` (`std_msgs/Bool`)
-- 전방 ROI(x: -1.0~-1.15m, y: ±1m)에 포인트가 30개 이상 잡히는 프레임이 5번 연속되면 장애물로 판단, **1회성으로 좌측 최대 조향 + 절반 속도를 1초간** `/cmd_obs`에 발행. 한 번 트리거되면 `evasion_triggered`가 다시 안 풀려서 그 이후로는 재판단을 안 함 (차량 한 사이클당 회피 1번만 가정).
-- `lane_change_flag`는 트리거 이후 영원히 `True` 유지 → `lane_trace`가 이걸 보고 반대 차선 기준으로 계속 주행.
+**`obs_evade`** (실제 실행 파일은 `obs_evade.py`. `obs_evade2.py`는 예전 개선판 초안, `setup.py`에 연결 안 돼있어 `ros2 run`으로 안 돌아감 — 지금 쓰는 상태머신 버전으로 대체됨)
+- Sub: `/scan` (`LaserScan`), `/lane_detected`·`/lane_line_len` (lane_trace가 보냄), `/lane_slope`
+- Pub: `/cmd_obs` (`Twist`), `/lane_change_flag`, `/lane_changing` (`Bool`)
+- 상태머신(`LANE2`→`TO_LANE1`→`LANE1`→`TO_LANE2`→…)으로 동작. 전방 ROI(`roi_near`~`roi_far`, 좌우 `roi_half_width`)에 장애물이 연속 `min_scans`번 잡히면 반대 차선으로 변경 시작. 변경 완료는 시간이 아니라 **lane_trace가 보내는 `/lane_detected`로 "원래 선이 사라지고 새 선이 잡혔는지"를 확인**(`change_mode: camera`)해서 판단, 이후 `/lane_slope`가 목표 기울기에 들어오면 정면 복귀 완료로 보고 넘김.
+- `mode` 파라미터로 `toggle`(장애물 만날 때마다 반대 차선, **2026-10-17 실차 검증된 설정**)과 `return`(장애물을 옆으로 지나치면 자동으로 원래 차선 복귀) 중 선택 — `return` 모드는 코드는 있지만 실차 미검증.
+- 평소(차선 변경 중이 아닐 때)엔 `/cmd_obs`에 아무것도 발행하지 않음 → `decision_auto`가 차선 추종으로 자연히 돌아감.
 
 **`gap_follow`** / **`wall_follow`**
 - 둘 다 Sub `/scan`, **Pub `/cmd_auto`** (파라미터로 토픽 바꿀 수 있지만 기본값이 `decision_auto`가 쓰는 토픽과 동일!).
@@ -110,49 +109,41 @@ src/
 
 ## 빌드 & 실행
 
-> 아래는 기본 빌드/실행 구조만 설명. **실제 차에서 돌릴 때 쓸 파라미터 값, 터미널 순서, 조이스틱 버튼은 [인수인계 문서](docs/summary/handoff_2026-10-11.md) 3절을 그대로 따라 하세요** (여기 적힌 건 기본값이라 그대로 실행하면 조향이 쏠리거나 속도가 너무 빠름).
+> 아래는 기본 빌드/실행 구조만 설명. **실제 차에서 돌릴 때 쓸 파라미터 값(특히 `lane_trace`/`obs_evade`의 `--params-file`)과 CPU 코어 배정(`taskset`)은 [10/17 인수인계](docs/summary/handoff_2026-10-17.md) 그대로 따라 하세요** — 기본값으로 그대로 실행하면 조향이 쏠리거나 속도가 너무 빠름.
 
 ```bash
-# colcon 워크스페이스 루트(이 src/의 상위 폴더)에서, ganghee 브랜치 체크아웃 상태로
+# colcon 워크스페이스 루트(이 src/의 상위 폴더)에서
 colcon build --symlink-install
 source install/setup.bash
 
 ros2 launch s1_stack s1_stack.launch.py
 ```
+`s1_stack.launch.py`가 띄우는 것: `joy_node`, `joy_to_twist`, `cmd_mux`, `serial_sender`, `decision_auto`, `sllidar_node`, 카메라 2대(`cam_lane` 320x240, `cam_front` 640x480).
 
-카메라 노드는 `s1_stack.launch.py`에 포함돼있지 않아 별도 실행 필요:
+**`lane_trace`, `sign_detect`, `obs_evade`는 launch 파일에 없어서 각자 따로 실행해야 함** (CPU가 부족해서 코어를 나눠 쓰기 위함):
 ```bash
-ros2 run lane_trace lane_trace
-ros2 run sign_detect sign_detect --ros-args -p model_path:=/절대/경로/best_0808.pt
+taskset -c 0-5 ros2 run lane_trace lane_trace --ros-args --params-file <튜닝 yaml>
+taskset -c 0-5 ros2 run obs_evade obs_evade --ros-args --params-file <튜닝 yaml> -p start_lane:=2
+OMP_NUM_THREADS=6 taskset -c 6-11 ros2 run sign_detect sign_detect --ros-args -p model_path:=/절대/경로/best_0808.pt
 ```
-`sign_detect`의 `model_path`는 필수 파라미터(기본값 없음, 안 주면 바로 에러). 디버그용 OpenCV 창(`cv2.imshow`)을 보려면 두 노드 모두 `-p debug_view:=true` 추가 (기본 꺼짐 — 디스플레이 없는 SSH 환경에서 안전하게 돌리기 위함).
+`sign_detect`의 `model_path`는 필수 파라미터(기본값 없음, 안 주면 바로 에러). 디버그용 OpenCV 창(`cv2.imshow`)을 보려면 `lane_trace`/`sign_detect`에 `-p debug_view:=true` 추가(기본 꺼짐, `obs_evade`는 영상 처리가 없어서 해당 없음).
 
-## 알려진 이슈 / 확인 필요 (2026-10 기준)
+## 알려진 이슈 (2026-10-17 실차 검증 기준)
 
-- `lane_trace`는 현재 **오른쪽 차선만** 검출함. 보고서 PDF의 예전 ROS1 버전은 좌/우 양쪽 차선 + `check_pixel_color` 색 검증까지 있었는데, ROS2로 옮기면서 빠짐 — 의도적 단순화인지 확인 필요.
-- `usb_cam`, `cv_bridge`가 humble용으로 실제 설치돼있는지, `numpy<2.0` 고정이 유지되는지(README 참고) 검증 차량에서 확인 필요. → **2026-10-11 네이티브 Ubuntu 22.04에서 설치·동작 확인됨.**
-- `lane_trace`의 ROI/HLS 임계값은 특정 조도 기준 튜닝값 — 10월 검증 트랙(4층 로비) 조명에 맞게 재조정 필요할 수 있음.
-- **DBSCAN 라이다 클러스터링 미구현**: 공식 목표 아키텍처(2026-10-08 공유된 구조도)와 예전 ROS1 코드(결과보고서 PDF)엔 `sklearn.cluster.DBSCAN` 기반 장애물 클러스터링이 있는데, 현재 `obs_evade`/`gap_follow`/`wall_follow`는 전부 단순 ROI/gap 거리 임계값 방식임. 김민준 담당 파트.
-- **주차(parking) 기능 전체가 없음**: HW엔 주차용 초음파센서(HC-SR04 ×2)가 있고 목표 구조도에도 주차 탐색/후진 주차 상태(S4~S5)가 있는데, 현재 repo엔 초음파 관련 노드/토픽이 아예 없음.
-- 목표 구조도는 아두이노 통신을 "rosserial"로 표기하고 토픽 이름도 다름(`/camera/lane_image_raw`, `/cluster_info` 등) — 현재 repo의 자체 시리얼 프로토콜/토픽 이름과 다르지만 기능상 문제는 아님, 다이어그램 보고 그대로 새로 짜지 않도록 주의.
-- 공식 HW 매뉴얼(2026-07-06) 기준 실제 차량 제어 PC는 **Ubuntu 20.04 + ROS1(Noetic)** — 이 repo(ROS2 humble)는 아직 실차에 올라간 적 없음. 검증 전에 Ubuntu 22.04+humble(또는 Docker) 올리는 작업이 선행되어야 함. → **2026-10-11에 네이티브 Ubuntu 22.04에서 실차 하드웨어로 자동 주행 체인이 검증됨** ([인수인계](docs/summary/handoff_2026-10-11.md)).
+- **밤 조명·신호등 근처에서 흰 선 검출이 깨짐**: 흰 선이 푸르스름(밤)하거나 붉게(신호등 근처) 찍히면서 색 기준(HLS `l_min`/`s_max`)을 벗어남. 낮에만 검증됨. 근본 해결은 화이트밸런스 보정 등 조명-불변 검출 방식 필요.
+- **`sign_detect`(YOLO, CPU 추론)가 1~3초씩 멈춤**: CPU 온도 80도대까지 올라가며 멈춰서 `decision_auto`의 STALE 판정을 유발. 장애물 회피 시험 때는 `decision_auto`를 `require_signals:=false`로 띄워서 끊김 감지만 꺼서 우회 — **이 설정은 경기용으로 쓰면 안 됨**(신호 끊김에 대한 안전장치가 꺼짐). 근본 해결은 모델 경량화(`imgsz` 축소, OpenVINO 등).
+- `obs_evade`의 출발 차선 자동 판단(`start_lane:=0`)이 특정 구간(상자 옆 2차선)에서 오판. 지금은 `start_lane`을 1/2로 직접 지정해서 씀.
+- `obs_evade`의 `mode: return`(장애물을 옆으로 지나치면 자동 복귀)은 코드는 있지만 실차 미검증 — 검증된 건 `mode: toggle`(장애물 만날 때마다 반대 차선)뿐.
+- 차선 변경 타이밍(`cam_min_s`/`cam_max_s`/`straighten_max_s` 등)은 특정 속도(`change_speed`)·배터리 상태에서 맞춘 경험값 — 속도가 바뀌면 재조정 필요.
+- Arduino 조향 각도 센서(A4, 8번 선) 접촉 불량이 이틀 연속 발생 — 바퀴가 명령 없이 제멋대로 움직이면 이 선부터 확인 (하드웨어, 미해결).
+- **DBSCAN 라이다 클러스터링 미구현**: 예전 ROS1 코드(결과보고서 PDF)엔 `sklearn.cluster.DBSCAN` 기반 장애물 클러스터링이 있었는데, 현재 `obs_evade`/`gap_follow`/`wall_follow`는 전부 단순 ROI/거리 임계값 방식임 (`ganghee` 브랜치에 DBSCAN 포팅판이 있으나 미병합). 김민준 담당 파트.
+- **주차(parking) 기능 전체가 없음**: HW엔 주차용 초음파센서(HC-SR04 ×2)가 있는데 현재 repo엔 초음파 관련 노드/토픽이 아예 없음.
 
-## WSL2(Ubuntu 22.04)로 검증할 때 꼭 필요한 설정
+## 노트북(WSL2/VM) 환경 설정
 
-USB로 실물 하드웨어 대신 각자 노트북(WSL2)에서 먼저 돌려볼 때 거의 확실히 겪는 문제 2개, 미리 해두면 시간 절약됨:
+`scripts/vm_setup.sh`가 아래 내용(locale, ROS2 설치, CycloneDDS, `setuptools` 핀, udev 규칙 등)을 대부분 자동으로 해줌. `NATIVE=1 bash scripts/vm_setup.sh`로 실행 (실차 노트북이면 USB 자동 절전도 같이 꺼줌).
 
-1. **colcon build가 "성공한 것처럼 보이는데" 실제로는 패키지가 등록 안 됨** — `pip install`(ultralytics/torch 등)이 최신 `setuptools`를 끌고 들어오면서 ROS2 humble의 구버전 `ament_python` 빌드 방식과 충돌(`TypeError: canonicalize_version() got an unexpected keyword argument 'strip_trailing_zero'`). `ros2 pkg list`에 패키지가 안 뜨면 이거 의심.
-   ```bash
-   pip install "setuptools==58.2.0"
-   rm -rf build install log && colcon build --symlink-install   # 반드시 클린 재빌드
-   ```
-2. **노드끼리 서로 못 찾음** (`ros2 node list`가 비어있음, publish해도 "Waiting for at least 1 matching subscription(s)..."에서 멈춤) — WSL2 가상 네트워크가 기본 DDS(Fast-DDS)의 멀티캐스트 디스커버리를 막아서 생김. CycloneDDS로 바꾸면 해결:
-   ```bash
-   sudo apt install -y ros-humble-rmw-cyclonedds-cpp
-   echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc
-   echo 'export ROS_LOCALHOST_ONLY=1' >> ~/.bashrc
-   ```
-
-USB 카메라/라이다/아두이노는 `usbipd-win`(윈도우 쪽)으로 WSL에 attach — 윈도우 재부팅/재연결할 때마다 다시 attach 필요.
-
-3. **카메라 이미지 토픽이 구독자한테 하나도 안 들어옴** (`lane_trace`/`sign_detect`가 로그도 안 찍고 조용히 멈춰있는 것처럼 보임) — `qos_profile_sensor_data`(best-effort) 구독 + 일반(reliable) publisher 조합에서, **이미지가 일정 크기 이상이면 이 WSL2 환경에서 전달 자체가 안 되는 현상 확인함** (8x8 테스트 이미지는 통과, 480x480은 0% 도달). `usb_cam`이 기본 reliable로 publish하는 경우 특히 해당. 실제 로봇(네이티브 리눅스)에서는 이 QoS 조합이 표준이라 문제 없을 가능성이 높지만, WSL2로 카메라 노드 테스트할 땐 이미지가 실제로 도착하는지 반드시 별도로 확인할 것 (예: `ros2 topic hz /cam_lane/image_raw`). 안 들어오면 임시로 구독 QoS를 reliable로 바꿔서 확인해볼 것.
+- **colcon build가 "성공한 것처럼 보이는데" 실제로는 패키지가 등록 안 됨**: `pip install`(ultralytics/torch 등)이 최신 `setuptools`를 끌고 들어와 ROS2 humble의 `ament_python` 빌드 방식과 충돌. `ros2 pkg list`에 패키지가 안 뜨면 `pip install "setuptools==58.2.0"` 후 `rm -rf build install log && colcon build --symlink-install`로 클린 재빌드.
+- **WSL2에서 노드끼리 서로 못 찾음**: 가상 네트워크가 기본 DDS(Fast-DDS)의 멀티캐스트 디스커버리를 막음 → `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`로 전환(스크립트가 처리).
+- **WSL2/VirtualBox 둘 다에서 카메라 영상이 구독자한테 하나도 안 들어옴** — 2026-10-10·10-11에 둘 다 확인된 문제(QoS가 아니라 가상화 환경 자체의 한계로 보임). 영상이 큰 토픽(카메라)은 **네이티브 Linux에서만 정상 동작 확인됨**. 카메라를 WSL2/VM으로 테스트하지 말고 네이티브 Ubuntu로 넘어갈 것.
+- USB 카메라/라이다/아두이노는 WSL2에선 `usbipd-win`(윈도우 쪽)으로 attach 필요 — 재부팅마다 다시 attach.

@@ -4,7 +4,11 @@
 #   /cmd_lane (lane_trace)   ─┐
 #   /light_stop, /cross_stop (sign_detect) ─┼→ decision_auto → /cmd_auto → cmd_mux
 #   /cmd_obs  (obs_evade)    ─┘
-# 우선순위: 1) 장애물 회피 > 2) 신호등/횡단보도 정지 > 3) 평상시 차선 추종
+# 우선순위: 1) 신호등/횡단보도 정지 > 2) 장애물 회피 > 3) 평상시 차선 추종
+# (공식 설계 스펙: 비상정지 > 신호등/횡단보도 > 장애물회피 > 주차 > 차선추종. 비상정지는 cmd_mux가
+#  이 노드보다 바깥쪽에서 처리하므로 여기서는 신호등부터 시작. 2026-10-18: 장애물회피가 신호등보다
+#  위에 있던 순서를 스펙대로 뒤집음 — 차선변경 중 빨간불/횡단보도를 만나면 변경을 끝까지 계속하던
+#  문제를 고침)
 
 import rclpy
 from rclpy.node import Node
@@ -41,7 +45,7 @@ class MotionDecision(Node):
         self.sub_light = self.create_subscription(Bool, '/light_stop', self.light_cb, 10)
         self.sub_cross = self.create_subscription(Bool, '/cross_stop', self.cross_cb, 10)
         
-        # 추가: 장애물 회피 명령 구독 (최우선순위)
+        # 추가: 장애물 회피 명령 구독 (신호등/횡단보도 정지 다음 순위, 평상시 차선추종보다는 위)
         self.sub_obs = self.create_subscription(Twist, '/cmd_obs', self.obs_cb, 10)
 
         # Publisher: 최종 제어 명령
@@ -92,17 +96,17 @@ class MotionDecision(Node):
             self.pub_auto.publish(msg)
             return
 
-        # [우선순위 1] 장애물 회피 명령 확인 (최근 0.2초 이내 수신된 경우만 유효)
-        if (current_time - self.last_obs_time) < 0.2:
-            msg = self.current_obs_cmd
-            self.get_logger().info('PRIORITY: OBSTACLE EVASION ACTIVE')
-        
-        # [우선순위 2] 정지 조건 확인 (신호등 OR 횡단보도)
-        elif self.stop_by_light or self.stop_by_crosswalk:
+        # [우선순위 1] 정지 조건 확인 (신호등 OR 횡단보도) — 장애물 회피 중이어도 신호가 우선
+        if self.stop_by_light or self.stop_by_crosswalk:
             msg.angular.z = self.current_lane_cmd.angular.z
             msg.linear.x = 0.0
             self.get_logger().info('STOP SIGNAL ACTIVE')
-            
+
+        # [우선순위 2] 장애물 회피 명령 확인 (최근 0.2초 이내 수신된 경우만 유효)
+        elif (current_time - self.last_obs_time) < 0.2:
+            msg = self.current_obs_cmd
+            self.get_logger().info('PRIORITY: OBSTACLE EVASION ACTIVE')
+
         # [우선순위 3] 일반 주행 (차선 인지)
         else:
             msg = self.current_lane_cmd

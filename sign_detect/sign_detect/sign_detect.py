@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# sign_detect: 전방 카메라 영상에서 YOLOv8로 횡단보도/신호등을 찾아서
+# /cross_stop, /light_stop (둘 다 Bool, True면 "정지해야 함")을 발행하는 노드.
+# decision_auto가 이걸 받아서 차선 추종보다 우선으로 정지 명령을 내림.
+# CPU 추론이라 느릴 수 있음(코어 많이 먹음) — 실행 시 taskset으로 전용 코어를 따로 배정해서 씀.
 
 import rclpy
 from rclpy.node import Node
@@ -39,9 +43,9 @@ class VisionPercept(Node):
         self.tl_history = deque(maxlen=5)
 
         # 설정값
-        self.img_width = 640
-        self.min_bbox_size = 15500
-        self.bbox_center_bound = [0.1, 0.9]
+        self.img_width = 640  # 카메라 폭(픽셀). 아래 bbox_center_bound와 같이 "화면 가운데 근처인지" 판단에 씀
+        self.min_bbox_size = 15500  # 신호등 박스 면적(px^2)이 이 이상이어야 "충분히 가까워졌다"고 봄
+        self.bbox_center_bound = [0.1, 0.9]  # 횡단보도 박스 중심이 화면 가로 10~90% 안에 있어야 유효
 
         # Pub/Sub
         self.sub_img = self.create_subscription(
@@ -53,9 +57,10 @@ class VisionPercept(Node):
         self.get_logger().info('Sign Detect Node has been started.')
 
     def image_callback(self, msg):
+        """카메라 프레임마다 호출: YOLO 추론 → 클래스별 판단 → 최근 5프레임 다수결로 최종 정지 여부 발행"""
         cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        
-        # 추론 수행
+
+        # 추론 수행 (모델 클래스: 0=횡단보도, 1=초록불(무시), 2=빨간불, 3=노란불)
         results = self.model(cv_img, verbose=False)[0]
         
         # --- 디버그 창 (debug_view 파라미터로 on/off, 헤드리스 환경에서는 꺼야 함) ---
@@ -85,11 +90,11 @@ class VisionPercept(Node):
                 if size >= self.min_bbox_size:
                     current_tl_detected = True
 
-        # 히스토리 업데이트
+        # 히스토리 업데이트 (최근 5프레임의 감지 여부만 기억)
         self.cw_history.append(current_cw_detected)
         self.tl_history.append(current_tl_detected)
 
-        # 최종 결정
+        # 최종 결정: 최근 5프레임 중 3프레임 이상 감지돼야 정지로 확정 (한두 프레임 오검출 노이즈 제거)
         stop_cw = Bool()
         stop_cw.data = sum(self.cw_history) >= 3
         

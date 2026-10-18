@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-
+# obs_evade: 라이다로 전방 장애물을 보고 반대 차선으로 옮겨가는 상태머신 노드.
+# 평소엔 아무것도 안 하고(lane_trace가 /cmd_lane으로 주행), 장애물을 보면 /cmd_obs에 조향/속도를
+# 직접 발행해서 decision_auto가 그걸 최우선으로 쓰게 함. 차선을 다 넘어가고 나면 다시 조용해짐.
+#
+# 상태 전환 흐름 (기본, mode='toggle'일 때):
+#   LANE2 --(전방 장애물)--> TO_LANE1 --(새 차선 선 확인+정면 복귀)--> LANE1
+#   LANE1 --(전방 장애물)--> TO_LANE2 --(새 차선 선 확인+정면 복귀)--> LANE2
+# mode='return'이면 LANE1에서 "옆 장애물을 지나쳤는지"를 라이다로 봐서 자동으로 TO_LANE2로 돌아감.
+# change_mode='camera'(기본)면 차선 변경 완료 판단을 "시간"이 아니라 lane_trace가 보내는
+# /lane_detected(선 사라짐→새 선 잡힘), /lane_slope(기울기가 목표 차선 기준에 들어왔는지)로 함.
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -8,7 +17,7 @@ from std_msgs.msg import Bool, Float32
 import numpy as np
 import time
 
-# 차량 상태
+# 차량 상태 (self.state가 이 5개 중 하나)
 LANE2 = 'LANE2'              # 평소 주행 차선(오른쪽). lane_trace가 오른쪽 실선을 따라감
 TO_LANE1 = 'TO_LANE1'        # 2차선 → 1차선 변경 중 (/cmd_obs 발행)
 DECIDING = 'DECIDING'        # 출발 차선 자동 판단 중(start_lane=0). 장애물 감지 안 함
@@ -17,6 +26,8 @@ TO_LANE2 = 'TO_LANE2'        # 1차선 → 2차선 변경 중 (/cmd_obs 발행)
 
 
 class ObstacleEvasionNode(Node):
+    """node name: obs_evade. 라이다(/scan)와 lane_trace의 보조 토픽을 구독해서 상태(self.state)를
+    관리하고, 10Hz 타이머(control_loop)가 그 상태에 맞는 /cmd_obs 명령을 발행함."""
     def __init__(self):
         super().__init__('obs_evade')
 
@@ -90,7 +101,7 @@ class ObstacleEvasionNode(Node):
         # 차선 변경 직후 이 시간 동안은 전방 감지 쉼(방금 피한 장애물 재감지 방지)
         self.declare_parameter('rearm_delay_s', 2.0)
 
-        gp = lambda n: self.get_parameter(n).value
+        gp = lambda n: self.get_parameter(n).value  # 파라미터 값을 짧게 읽어오는 축약
         self.MAX_SPEED = float(gp('max_speed'))
         self.MAX_STEER = float(gp('max_steer'))
         self.MODE = str(gp('mode'))
@@ -99,6 +110,8 @@ class ObstacleEvasionNode(Node):
         self.CHANGE_SPEED = float(gp('change_speed'))
         self.CHANGE_MODE = str(gp('change_mode'))
         self.CAM_MIN_S, self.CAM_MAX_S = float(gp('cam_min_s')), float(gp('cam_max_s'))
+        # by(name, base): "name_l1"/"name_l2" 파라미터를 읽어서 {LANE1: 값, LANE2: 값} 딕셔너리로.
+        # 음수로 두면(기본값) 차선별로 안 나누고 공통값(base)을 그대로 씀
         by = lambda name, base: {lane: (float(gp(f'{name}_{suf}')) if float(gp(f'{name}_{suf}')) >= 0.0 else base)
                                  for lane, suf in ((LANE1, 'l1'), (LANE2, 'l2'))}
         self.CAM_MIN_BY, self.CAM_MAX_BY = by('cam_min_s', self.CAM_MIN_S), by('cam_max_s', self.CAM_MAX_S)
@@ -169,6 +182,8 @@ class ObstacleEvasionNode(Node):
             f'time={self.CHANGE_TIME}s speed={self.CHANGE_SPEED} roi={self.ROI_NEAR}~{self.ROI_FAR}m')
 
     def set_state(self, state):
+        """상태를 바꾸고 그 상태에서 쓰는 타이머/카운터를 전부 초기화함. 상태가 바뀔 때마다 꼭 이걸 통해서
+        바꿔야 함(직접 self.state = ... 로 바꾸면 이전 상태의 카운터가 남아서 오작동할 수 있음)"""
         self.state = state
         self.state_start = time.time()
         self.change_step = -1
@@ -184,6 +199,7 @@ class ObstacleEvasionNode(Node):
         self.get_logger().warn(f'State -> {state}')
 
     def slope_callback(self, msg):
+        """lane_trace가 보낸 최근 검출 기울기(/lane_slope) 저장. 정면 복귀 완료 판단(control_loop)에 씀"""
         self.last_slope, self.last_slope_t = float(msg.data), time.time()
 
     def detected_callback(self, msg):
@@ -262,6 +278,10 @@ class ObstacleEvasionNode(Node):
                 self.set_state(TO_LANE2)
 
     def control_loop(self):
+        """10Hz 타이머. 지금 상태(self.state)에 따라 해야 할 일을 전부 여기서 결정함:
+        차선 변경 중이 아니면 아무것도 안 하고, 변경 중이면 camera/timed 방식에 맞게
+        /cmd_obs(조향+속도)를 계산해서 보냄. 상태 전환 자체는 scan_callback(장애물 보고 시작)과
+        이 함수 안(새 선 찾기 완료, 정면 복귀 완료 등)에서 일어남."""
         # 1. 플래그 발행: 1차선이거나 1차선으로 가는 중이면 True
         flag_msg = Bool()
         flag_msg.data = self.state in (TO_LANE1, LANE1)

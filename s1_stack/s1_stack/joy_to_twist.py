@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# joy_to_twist: 조이스틱 축(/joy) 값을 운전 명령(Twist)으로 바꿔 /cmd_manual로 내보냄.
+# cmd_mux가 MANUAL 모드일 때 이 토픽을 그대로 써서 수동 운전함.
+# 전후진은 비례 제어가 아니라 "임계값만 넘으면 최고 속도"(on-off) 방식이라 스틱을 살짝만 밀어도 확 나감.
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
@@ -6,6 +9,7 @@ from geometry_msgs.msg import Twist
 
 
 def clamp(x, lo, hi):
+    """x를 [lo, hi] 범위로 자름"""
     return max(lo, min(hi, x))
 
 
@@ -54,6 +58,7 @@ class JoyToTwist(Node):
         )
 
     def on_joy(self, msg: Joy):
+        """조이스틱 입력마다 호출. 최신 조향/속도 값을 저장만 해두고, 실제 발행은 on_timer가 주기적으로 함"""
         steer = msg.axes[self.axis_steer] if self.axis_steer < len(msg.axes) else 0.0
         drive = msg.axes[self.axis_drive] if self.axis_drive < len(msg.axes) else 0.0
 
@@ -62,13 +67,13 @@ class JoyToTwist(Node):
         if self.invert_drive:
             drive = -drive
 
-        # steering: proportional
+        # steering: proportional — 스틱을 기울인 만큼 조향도 비례해서 커짐 (deadzone 안쪽은 0)
         if abs(steer) < self.steer_deadzone:
             steer = 0.0
         stn = steer * self.stn_scale
         stn = clamp(stn, -self.stn_scale, self.stn_scale)
 
-        # drive: full-scale manual
+        # drive: full-scale manual — 비례가 아니라 on-off. drive_threshold만 넘으면 바로 최고 속도(±1.0)
         if drive > self.drive_threshold:
             lin = 1.0
         elif drive < -self.drive_threshold:
@@ -81,6 +86,8 @@ class JoyToTwist(Node):
         self.have_joy = True
 
     def on_timer(self):
+        """publish_rate_hz(기본 20Hz)로 최신 조이스틱 값을 /cmd_manual로 발행. 조이스틱이 한 번도
+        안 잡히면(have_joy=False) 아예 발행하지 않음 — cmd_mux 쪽에서 timeout으로 정지 처리됨"""
         if not self.have_joy:
             return
 

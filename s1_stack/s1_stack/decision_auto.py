@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# decision_auto: 자율주행 쪽 입력 여러 개(차선 추종, 신호등/횡단보도 정지, 장애물 회피)를
+# 우선순위에 따라 하나의 /cmd_auto 명령으로 합치는 노드. cmd_mux가 이걸 받아서 최종 출력함.
+#   /cmd_lane (lane_trace)   ─┐
+#   /light_stop, /cross_stop (sign_detect) ─┼→ decision_auto → /cmd_auto → cmd_mux
+#   /cmd_obs  (obs_evade)    ─┘
+# 우선순위: 1) 장애물 회피 > 2) 신호등/횡단보도 정지 > 3) 평상시 차선 추종
 
 import rclpy
 from rclpy.node import Node
@@ -22,12 +28,12 @@ class MotionDecision(Node):
         self.last_cross_time = None
 
         # 상태 변수 초기화
-        self.stop_by_light = False
-        self.stop_by_crosswalk = False
-        self.current_lane_cmd = Twist()
+        self.stop_by_light = False       # 빨간불이면 True (sign_detect가 보냄)
+        self.stop_by_crosswalk = False   # 횡단보도 감지되면 True (sign_detect가 보냄)
+        self.current_lane_cmd = Twist()  # 가장 최근 받은 차선 추종 명령
 
         # 추가: 장애물 회피 명령 저장 변수 및 수신 시간
-        self.current_obs_cmd = Twist()
+        self.current_obs_cmd = Twist()  # obs_evade가 차선 변경 중일 때 보내는 명령 (평소엔 안 옴)
         self.last_obs_time = 0.0
 
         # Subscribers
@@ -62,10 +68,12 @@ class MotionDecision(Node):
         self.last_obs_time = self.get_clock().now().nanoseconds / 1e9
 
     def publish_decision(self):
+        """10Hz 타이머. 지금까지 콜백으로 쌓인 값들을 보고 최종 /cmd_auto 하나를 결정해서 내보냄"""
         msg = Twist()
         current_time = self.get_clock().now().nanoseconds / 1e9
 
         def fresh(received_at, timeout):
+            """해당 토픽이 timeout초 이내에 수신됐는지(= 그 노드가 살아서 값을 계속 보내고 있는지)"""
             return received_at is not None and 0 <= current_time - received_at < timeout
 
         # [안전장치] 차선/신호 입력이 끊기거나 오래됐으면, 다른 판단 하지 말고 바로 정지

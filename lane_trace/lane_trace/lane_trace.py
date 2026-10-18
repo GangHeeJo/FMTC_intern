@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# lane_trace: 차선 카메라 영상을 보고 조향각을 계산해 /cmd_lane으로 내보내는 노드.
+# 늘 "오른쪽 차선 하나"만 보고 따라감 — 2차선 주행 중엔 오른쪽 실선, 1차선 주행 중(/lane_change_flag=True)엔
+# 오른쪽 점선을 쫓아감(과거엔 이미지를 반전해서 같은 로직을 재사용했지만 지금은 기본적으로 안 씀).
+# 검출 방식은 2가지(detector 파라미터로 선택):
+#   1 = 기존 방식: HLS로 흰색만 남기고 → Canny 엣지 → HoughLinesP로 직선 검출
+#   2 = lane_detect_v2: 흰 덩어리의 굵기/길이/모양으로 점선·실선·주차선·흰 차체를 구분해서 더 정확하게 고름
+# 결과(조향각)는 /cmd_lane으로, 그 외에 obs_evade가 차선 변경 판단에 쓰는 보조 토픽
+# (/lane_detected, /lane_slope, /lane_line_len)도 같이 발행함.
 
 import rclpy
 from rclpy.node import Node
@@ -31,6 +39,8 @@ def remove_big(mask, max_area):
     return mask
 
 def color_filter(image, l_min=100, s_max=255):
+    """영상에서 흰색(차선)만 남긴 이진 마스크를 만듦. BGR 대신 HLS를 쓰는 이유는 밝기(L)와
+    색(H/S)이 분리돼 있어서 조명이 바뀌어도 "밝고 채도 낮은 흰색"이라는 기준이 비교적 안정적이기 때문"""
     # 햇빛 변화에 강한 HLS 색 공간 변환
     hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
 
@@ -43,15 +53,20 @@ def color_filter(image, l_min=100, s_max=255):
     return mask
 
 def image_crop(image, start_point=(100, 220), end_point=(640, 450)):
+    """start_point~end_point 사각형 바깥을 전부 0으로 지움 (관심영역, ROI만 남김)"""
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     cv2.rectangle(mask, start_point, end_point, 255, thickness=cv2.FILLED)
     return cv2.bitwise_and(image, image, mask=mask)
 
 def get_x_coordinate(y_value, slope, y_intercept):
+    """1차 함수(y = slope*x + y_intercept)에서, 특정 y_value일 때의 x 좌표를 구함.
+    y=300(화면 중간 높이) 지점에서 선이 어디 있는지를 구해 조향 기준(guide_x)과 비교하는 데 씀"""
     if slope == 0: return 320
     return int((y_value - y_intercept) / slope)
 
 def auto_canny(image, sigma=0.33):
+    """Canny 엣지 검출의 상/하한 임계값을 영상 밝기 중앙값(median) 기준으로 자동으로 정함
+    (고정값 대신 쓰면 조명이 바뀌어도 어느 정도 알아서 맞춰짐)"""
     # 가우시안 블러로 노이즈 제거
     image_blur = cv2.GaussianBlur(image, (5, 5), 0)
     v = np.median(image_blur)
@@ -167,6 +182,9 @@ def lane_detect_v2(image, guide_x, guide_slope, a_rad, b_rad, min_slope, roi_top
 def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027,
                 min_slope=0.4, right1=330, right2=640, roi_top=220, l_min=100, s_max=255, open_k=1, max_blob=0,
                 detector=1, **v2):
+    """한 프레임을 받아 조향각(rad)을 계산하는 메인 함수. 선을 못 찾으면 steer=None 반환.
+    detector==2면 모양 기반 방식(lane_detect_v2)으로 넘기고, 기본(1)은 아래의 기존 방식(HLS → Canny → HoughLinesP)을 씀.
+    반환값: (디버그용 오버레이 이미지, 흰색 마스크, 조향각 rad 또는 None)"""
     if detector == 2:
         return lane_detect_v2(image, guide_x, guide_slope, a_rad, b_rad, min_slope, roi_top, l_min, s_max,
                               open_k, max_blob, **v2)
@@ -255,6 +273,9 @@ def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027,
 
 
 class LaneMaskingNode(Node):
+    """node name: lane_masking_node. 카메라 콜백(image_callback)마다 lane_detect를 돌려서
+    조향각을 구하고, 2차선/1차선 어느 쪽을 보고 있는지(lane_change_flag)와 지금 차선을 바꾸는
+    중인지(lane_changing)에 따라 그때그때 맞는 파라미터(guide_x, ROI 등)를 골라 씀."""
     def __init__(self):
         super().__init__('lane_masking_node')
         self.cv_bridge = CvBridge()
@@ -408,6 +429,9 @@ class LaneMaskingNode(Node):
         self.lane_change_flag = msg.data
 
     def image_callback(self, msg):
+        """카메라 프레임마다 호출됨: ① 지금 상태(2/1차선, 변경 중인지)에 맞는 파라미터를 고르고
+        ② lane_detect로 조향각을 구하고 ③ 차선을 못 봤을 때의 안전장치(lost_hold_s 등)를 적용해서
+        ④ 최종 /cmd_lane과 obs_evade용 보조 토픽들을 발행함"""
         image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         # lane_detect의 ROI/기준값은 640x480 좌표 기준. 640x480 영상은 DDS 전달 중 프레임이 많이 빠져서
         # 카메라를 320x240으로 받을 수 있게 하고, 여기서 640x480으로 늘려 기존 로직을 그대로 쓴다.

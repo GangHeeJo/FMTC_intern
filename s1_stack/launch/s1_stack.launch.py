@@ -59,8 +59,9 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'video_device': '/dev/cam_lane',
-                'image_width': 640,
-                'image_height': 480,
+                # 640x480은 DDS 전달 중 프레임이 많이 빠짐. lane_trace가 640x480으로 늘려서 처리함
+                'image_width': 320,
+                'image_height': 240,
                 'framerate': 30.0,
                 'pixel_format': 'mjpeg2rgb',
             }],

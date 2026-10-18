@@ -22,7 +22,7 @@ class CmdMux(Node):
 
         self.declare_parameter('btn_auto', 0)      # A
         self.declare_parameter('btn_manual', 1)    # B
-        self.declare_parameter('btn_stop', 3)      # X
+        self.declare_parameter('btn_stop', 3)      # Y (Xbox 패드에서 3번 = Y, 10/17 확인. X는 2번)
         self.declare_parameter('initial_mode', MODE_STOP)
         self.declare_parameter('manual_timeout_s', 0.5)
         self.declare_parameter('auto_timeout_s', 0.3)
@@ -120,6 +120,10 @@ class CmdMux(Node):
             self.pub_cmd.publish(self.last_auto)
             return
 
+        # 수동 명령이 끊기면(조이스틱 연결 끊김 등) 마지막 명령을 계속 반복하지 않고 정지
+        if now - self.last_manual_t >= self.manual_timeout:
+            self.pub_cmd.publish(twist_zero())
+            return
         self.pub_cmd.publish(self.last_manual)
 
 def main():

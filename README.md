@@ -49,12 +49,12 @@ src/
 /cam_lane  → lane_trace   → /cmd_lane  ─┐
 /cam_front → sign_detect  → /light_stop, /cross_stop ─┤
 /scan      → obs_evade    → /cmd_obs   ─┼→ decision_auto → /cmd_auto ┐
-                                         │  (우선순위: 장애물 > 정지신호 > 차선)   │
+                                         │  (우선순위: 정지신호 > 장애물 > 차선)   │
 /joy → joy_to_twist → /cmd_manual ──────┘                              ├→ cmd_mux → /cmd_out → serial_sender → Arduino(S1.ino)
                                                                         │   (조이스틱으로 MANUAL/AUTO/STOP 모드 전환)
 ```
 
-- `decision_auto`: 장애물 회피(0.2s 이내 수신 시 최우선) → 신호등/횡단보도 정지 → 평상시 차선 추종, 순으로 `/cmd_auto` 하나로 병합.
+- `decision_auto`: 신호등/횡단보도 정지 → 장애물 회피(0.2s 이내 수신 시) → 평상시 차선 추종, 순으로 `/cmd_auto` 하나로 병합(2026-10-18: 장애물 회피가 신호 정지보다 위에 있던 순서를 공식 설계 스펙대로 뒤집음).
 - `cmd_mux`: 조이스틱 버튼(A=자동, B=수동, **Y=정지**, Xbox 컨트롤러 기준 `btn_stop: 3`)으로 모드 전환, 자동/수동 명령에 타임아웃 적용해 신호 끊기면 자동 정지(failsafe).
 - `serial_sender`: `geometry_msgs/Twist`를 `"TH:<-1000..1000> STN:<-1000..1000>"` 텍스트 라인으로 변환해 시리얼로 전송. rosserial 아님, 자체 프로토콜.
 

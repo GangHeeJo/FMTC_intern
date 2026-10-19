@@ -421,6 +421,10 @@ class LaneMaskingNode(Node):
         # 따라갈 선(점선)이 오른쪽에 있으므로 기본은 끔
         self.declare_parameter('flip_on_lane_change', False)
         self.flip_on_lane_change = bool(self.get_parameter('flip_on_lane_change').value)
+        # True면 목표 차선이 1차선인 동안(1차선 주행 + 2→1 변경 중, lane_change_flag=True) 항상 반전 — 정면 카메라(10/19~):
+        # 2→1 변경 중에도 반전해 1차선 왼쪽 실선을 찾고, 1→2(반전 없음)는 그 좌우 대칭이 됨. lane_mirror는 반전에 안 씀
+        self.declare_parameter('flip_target', False)
+        self.flip_target = bool(self.get_parameter('flip_target').value)
         # 인식 구역 오른쪽 경계(px). 1차선에서는 점선 오른쪽의 주차 구역 선이 같이 잡히므로 좁힘(10/16: 440)
         self.declare_parameter('right2', 640, ParameterDescriptor(dynamic_typing=True))
         self.right2 = int(self.get_parameter('right2').value)
@@ -572,7 +576,10 @@ class LaneMaskingNode(Node):
         in_lane1 = self.lane_change_flag is True or self.lane_mirror
         # 1차선 주행 반전(flip_on_lane_change)은 차선 변경 중에는 안 함: 2→1 변경은 반전 없이, 1→2는 lane_mirror로 반전해야
         # 두 변경이 서로 좌우 대칭이 됨(10/19)
-        flip = (self.lane_change_flag is True and self.flip_on_lane_change and not self.lane_changing) or self.lane_mirror
+        if self.flip_target:
+            flip = self.lane_change_flag is True and self.flip_on_lane_change
+        else:
+            flip = (self.lane_change_flag is True and self.flip_on_lane_change and not self.lane_changing) or self.lane_mirror
         if flip != getattr(self, '_last_flip', False):
             _v3_track.clear()  # 반전 전후로 선 위치가 좌우로 바뀌므로 추적 초기화
             self.steer_hist = []

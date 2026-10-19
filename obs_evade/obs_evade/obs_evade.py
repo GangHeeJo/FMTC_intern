@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, UInt8
 import numpy as np
 import time
 
@@ -164,6 +164,10 @@ class ObstacleEvasionNode(Node):
         self.detected_sub = self.create_subscription(Bool, '/lane_detected', self.detected_callback, 10)
         self.slope_sub = self.create_subscription(Float32, '/lane_slope', self.slope_callback, 10)
         self.line_len_sub = self.create_subscription(Float32, '/lane_line_len', self.line_len_callback, 10)
+        # 자동(AUTO=1) 모드에서만 장애물 감지. 수동으로 차를 옮기다 장애물에 다가가도 회피 상태로 넘어가지 않게(10/19:
+        # 시험 사이에 obs_evade가 LANE1로 넘어가 있어 lane_trace가 2차선에서 반전 영상으로 1차선 실선을 찾음)
+        self.drive_mode = None
+        self.mode_sub = self.create_subscription(UInt8, '/drive_mode', self.mode_callback, 10)
 
         # 제어 루프 (10Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -189,6 +193,9 @@ class ObstacleEvasionNode(Node):
         self.cross_start = None
         self.straighten_err0 = None
         self.get_logger().warn(f'State -> {state}')
+
+    def mode_callback(self, msg):
+        self.drive_mode = int(msg.data)
 
     def slope_callback(self, msg):
         self.last_slope, self.last_slope_t = float(msg.data), time.time()
@@ -243,7 +250,9 @@ class ObstacleEvasionNode(Node):
         # 전방 장애물: 2차선이든 1차선이든 감지되면 반대 차선으로 (두 모드 공통)
         # 차선 변경 직후 rearm_delay_s 동안은 쉼(방금 피한 장애물이 옆 차선 앞쪽에 보여 재감지되는 것 방지)
         self.blocked = False
-        if self.state in (LANE2, LANE1) and time.time() - self.state_start >= self.REARM_DELAY:
+        if self.drive_mode is not None and self.drive_mode != 1:
+            self.obstacle_count = 0
+        elif self.state in (LANE2, LANE1) and time.time() - self.state_start >= self.REARM_DELAY:
             roi_idx = (ahead > self.ROI_NEAR) & (ahead < self.ROI_FAR) & (np.abs(right) < self.ROI_HALF_W)
             if np.sum(roi_idx) >= self.MIN_POINTS:
                 self.obstacle_count += 1

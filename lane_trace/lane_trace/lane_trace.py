@@ -171,7 +171,7 @@ _v3_track = {}
 def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
                    y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
                    k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=80.0, max_jump_cold=200.0, join_px=40.0, join_k=0.3,
-                   track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0):
+                   track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0, fit_top=None, y_look=None):
     """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
     흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
@@ -186,7 +186,11 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
     기준값(10/19, 2차선 직선 중앙에 세운 차, 640x480): 왼쪽 x=60 k=-0.54, 오른쪽 x=519 k=+0.51 → 중앙 289, 소실점 (296, -137)
     sides='R'이면 오른쪽 선(2차선 실선)만 따라감(10/19 사용자 결정: 점선 쪽에서 옆 차로 선·트랙 밖 흰 차를 잡는 문제).
     1차선은 lane_trace가 영상을 좌우 반전해 왼쪽 실선이 오른쪽에 오게 해서 같은 값으로 따라감.
-    굵기(max_thick, px)보다 두꺼운 덩어리(흰 차 차체 등)는 선이 아님."""
+    굵기(max_thick, px)보다 두꺼운 덩어리(흰 차 차체 등)는 선이 아님.
+    y_look을 주면 소실점 대신 화면 안 앞쪽 높이(y_look)의 차로 중앙으로 방향을 봄(10/19 커브 시험: 휜 실선을 직선으로 맞춰
+    화면 위 밖 소실점까지 늘리면 커브 앞에서 218px 왼쪽으로 과장돼 출발하자마자 최대로 꺾고 점선을 넘음).
+    조향 = b × (y_eval 중앙 − guide_x) + a × (y_look 중앙 − 기준 중앙선의 y_look 위치).
+    fit_top을 주면 그보다 아래(가까운) 점만으로 선을 맞춤 — 먼 곳의 휨이 섞이지 않게."""
     overlay = image.copy()
     # 흰 선 밝기 기준을 화면에 맞춰 정함: 바닥(중앙값) + l_rel × (상위 1% − 바닥). usb_cam 영상은 밝기 50으로 설정돼
     # 어둡고(바닥 14, 선 121~130) 조명에 따라 크게 바뀌어 고정 l_min으로는 놓침(10/19). 선이 없을 때 너무 내려가지 않게 l_floor.
@@ -234,6 +238,8 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         seed = min(near, key=lambda c: abs(c['x'] - expect))
         group = [c for c in cands[s] if abs(c['x'] - seed['x']) < join_px and abs(c['k'] - seed['k']) < join_k]
         xs = np.concatenate([c['xs'] for c in group]); ys = np.concatenate([c['ys'] for c in group])
+        if fit_top is not None and np.sum(ys >= fit_top) >= 20:
+            xs, ys = xs[ys >= fit_top], ys[ys >= fit_top]
         k, b = np.polyfit(ys, xs, 1)
         fits[s] = (float(k), float(b))
         _v3_track[s] = (float(k * y_eval + b), float(k), 0)
@@ -266,7 +272,23 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
     last_metrics.update({'slope_avg': float(np.arctan2(1.0, k_side)), 'x_value': float(x_c), 'x_vp': float(x_vp),
                          'sides': ''.join(sorted(fits)), 'l_min': l_min})
     # +rad = 오른쪽: 중앙이 기준보다 오른쪽(차가 왼쪽으로 밀림) / 소실점이 오른쪽(차가 왼쪽을 봄)이면 오른쪽으로
-    steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_vp - guide_vp)
+    if y_look is None:
+        steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_vp - guide_vp)
+    else:
+        # y_look 높이의 차로 중앙: 양쪽이면 평균, 한쪽이면 원근에 맞춘 반폭(소실점에서 0, y_eval에서 lane_width/2)만큼 안쪽
+        half = lane_width / 2.0 * (y_look - vp_y) / (y_eval - vp_y)
+        if 'L' in fits and 'R' in fits:
+            x_look = (at(fits['L'], y_look) + at(fits['R'], y_look)) / 2.0
+        elif 'L' in fits:
+            x_look = at(fits['L'], y_look) + half
+        else:
+            x_look = at(fits['R'], y_look) - half
+        # 기준 중앙선: (guide_x, y_eval)과 (guide_vp, vp_y)를 잇는 선
+        x_look0 = guide_x + (guide_vp - guide_x) * (y_eval - y_look) / (y_eval - vp_y)
+        last_metrics['x_look'] = float(x_look)
+        cv2.circle(overlay, (int(x_look), int(y_look)), 6, (0, 255, 0), -1)
+        cv2.circle(overlay, (int(x_look0), int(y_look)), 6, (255, 255, 255), 2)
+        steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_look - x_look0)
     return overlay, mask, float(np.clip(steering_rad, -steer_max, steer_max))
 
 
@@ -494,11 +516,12 @@ class LaneMaskingNode(Node):
                      ('open_k_v3', 7), ('roi_top_v3', 40), ('roi_bot_v3', 320), ('y_eval_v3', 300),
                      ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
-                     ('k_min_v3', 0.25), ('max_thick_v3', 45.0)):
+                     ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
-                   'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3')}
+                   'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
+                   'fit_top_v3', 'y_look_v3')}
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -583,7 +606,9 @@ class LaneMaskingNode(Node):
                 detector=3, roi_top=int(v3['roi_top_v3']), roi_bot=int(v3['roi_bot_v3']), y_eval=int(v3['y_eval_v3']),
                 lane_width=float(v3['lane_width_v3']), vp_y=float(v3['vp_y_v3']),
                 l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']), steer_max=float(v3['steer_max_v3']),
-                sides=str(v3['sides_v3']), k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']))
+                sides=str(v3['sides_v3']), k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']),
+                fit_top=int(v3['fit_top_v3']) if int(v3['fit_top_v3']) >= 0 else None,
+                y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None)
         else:
             result_img, mask_img, steer_rad = lane_detect(
                 image, guide_x, guide_slope,

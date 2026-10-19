@@ -171,7 +171,8 @@ class ObstacleEvasionNode(Node):
         self.get_logger().info(
             f'Obstacle Evasion Node Started: mode={self.MODE} change_mode={self.CHANGE_MODE} '
             f'(cam to L1 {self.CAM_MIN_BY[LANE1]}~{self.CAM_MAX_BY[LANE1]}s, '
-            f'to L2 {self.CAM_MIN_BY[LANE2]}~{self.CAM_MAX_BY[LANE2]}s) change steer={self.CHANGE_STEER} '
+            + (f'to L2 = mirrored L1) ' if self.MIRROR else f'to L2 {self.CAM_MIN_BY[LANE2]}~{self.CAM_MAX_BY[LANE2]}s) ')
+            + f'change steer={self.CHANGE_STEER} '
             f'time={self.CHANGE_TIME}s speed={self.CHANGE_SPEED} roi={self.ROI_NEAR}~{self.ROI_FAR}m')
 
     def set_state(self, state):

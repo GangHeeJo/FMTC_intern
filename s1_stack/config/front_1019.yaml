@@ -1,13 +1,43 @@
 # 10/19~ 차선 카메라를 오른쪽 → 정면으로 옮긴 뒤의 설정 (도경윤)
 # 실행:
 #   taskset -c 0-5 ros2 run lane_trace lane_trace --ros-args --params-file <이 파일>
+#   taskset -c 0-5 ros2 run obs_evade obs_evade --ros-args --params-file <이 파일>
 #
-# 속도: linear_speed 1.0 × th_scale 1000(s1_stack.yaml) → PWM 180 (S1 펌웨어 상한)
+# 속도: 차선 주행 linear_speed 1.0 × th_scale 1000(s1_stack.yaml) → PWM 180 (S1 펌웨어 상한)
+#       차선 변경 max_speed 1.0 × change_speed 0.7 × 1000 → PWM 126
+# 10/17 bag(장애물 15회): PWM 57에서 실제 약 0.15 m/s, 차선 변경은 늘 장애물 약 1.35 m 앞에서 시작.
+# 아래 시간·거리 값은 속도가 PWM에 비례한다고 보고(180 → 약 0.47 m/s, 126 → 약 0.33 m/s) 10/17 값을 환산한 시작값.
+# 실제 속도를 재면 다시 맞출 것.
 #
 # 차선 기준값(guide_x/guide_slope, ROI 등)은 카메라를 옮겨서 obstacle_1017.yaml 값이 맞지 않음.
 # 정면 카메라로 녹화한 bag을 보고 다시 맞출 예정 — 그 전에는 자동 주행하지 말 것.
-# obs_evade 시간 값(cam_*_s 등)도 카메라 위치와 속도가 바뀌어 다시 맞춰야 함.
 
 lane_masking_node:            # lane_trace 노드 이름
   ros__parameters:
     linear_speed: 1.0
+    # 차선을 놓친 뒤 마지막 조향으로 버티는 시간. 버티는 거리를 10/17과 같게: × 57/180
+    lost_hold_s: 0.5          # 10/17: 1.5
+    lost_hold_s_l1: 1.3       # 10/17: 4.0 (점선 칸 사이)
+
+obs_evade:
+  ros__parameters:
+    mode: toggle
+    start_lane: 0             # 출발 차선 자동 판단. start_len_px(450)는 오른쪽 카메라 기준이라 정면 카메라로 다시 맞춰야 함
+    change_speed: 0.7         # PWM 126 (10/19 결정: 변경도 빠르게)
+    mirror_to_lane2: true     # 1→2는 2→1을 좌우 반전 → 아래 _l1 값만 맞추면 됨
+    # 전방 감지: 변경 시작 지점을 10/17(약 1.35 m)과 비슷하게(약 1.45 m, 조향이 다 꺾이는 동안 더 가므로 조금 앞).
+    # 10/17 구간 1.3~1.45(폭 0.15 m)에 스캔 6번이면 0.47 m/s에서는 0.6초 동안 0.28 m를 가서 구간을 지나쳐 감지가 안 됨
+    # → 구간을 넓히고 스캔 수를 줄임. 시작 지점 ≈ roi_far − (min_scans−1) × 0.1초 × 속도 = 1.6 − 0.14 ≈ 1.46 m
+    roi_near: 1.3
+    roi_far: 1.6              # 10/17: 1.45
+    min_scans: 4              # 10/17: 6 (기본값). 0.3초
+    # 10/17 bag 장애물 점 수(중앙값/하위 10%): 1.3 m 70/65, 1.5 m 51/30, 1.6 m 57/25. 30이면 1.5 m 넘어서
+    # 가끔 한 스캔이 빠져 연속 횟수가 0으로 돌아가므로 조금 낮춤
+    min_points: 25            # 10/17: 30 (기본값)
+    rearm_delay_s: 1.0        # 10/17: 2.0 (기본값). 방금 피한 장애물 재감지 방지 — 빨라진 만큼 줄임
+    # 2→1 (반전으로 1→2에도 씀). 시간 = 10/17 값 × 57/126(≈0.45)
+    cam_min_s_l1: 1.4         # 10/17: 3.0
+    cam_max_s_l1: 3.6         # 10/17: 8.0
+    cam_cross_s_l1: 0.7       # 10/17: 1.5
+    straighten_tol_l1: 0.3    # 기울기 기준이라 속도와 무관. 단 카메라가 바뀌어 다시 맞춰야 함
+    straighten_max_s_l1: 2.3  # 10/17: 5.0

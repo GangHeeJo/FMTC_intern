@@ -520,12 +520,13 @@ class LaneMaskingNode(Node):
                      ('open_k_v3', 7), ('roi_top_v3', 40), ('roi_bot_v3', 320), ('y_eval_v3', 300),
                      ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
-                     ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1)):
+                     ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
+                     ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
-                   'fit_top_v3', 'y_look_v3')}
+                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1')}
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -607,8 +608,15 @@ class LaneMaskingNode(Node):
 
         if detector == 3:
             v3 = self.v3
+            # 반전 영상(1차선)의 기준값: 카메라가 차 중심에서 비켜 달려 2차선 값을 그대로 쓰면 차가 실선 쪽으로 붙음(10/19
+            # 회피 3차: 1차선에서 실선에 거리 없이 주행). 음수면 2차선 값 그대로
+            gx, gvp = float(v3['guide_x_v3']), float(v3['guide_vp_v3'])
+            if flip and float(v3['guide_x_v3_l1']) >= 0:
+                gx = float(v3['guide_x_v3_l1'])
+            if flip and float(v3['guide_vp_v3_l1']) >= 0:
+                gvp = float(v3['guide_vp_v3_l1'])
             result_img, mask_img, steer_rad = lane_detect(
-                image, float(v3['guide_x_v3']), float(v3['guide_vp_v3']), a_rad=float(v3['a_rad_v3']),
+                image, gx, gvp, a_rad=float(v3['a_rad_v3']),
                 b_rad=float(v3['b_rad_v3']), l_min=self.l_min, s_max=self.s_max, open_k=int(v3['open_k_v3']),
                 detector=3, roi_top=int(v3['roi_top_v3']), roi_bot=int(v3['roi_bot_v3']), y_eval=int(v3['y_eval_v3']),
                 lane_width=float(v3['lane_width_v3']), vp_y=float(v3['vp_y_v3']),

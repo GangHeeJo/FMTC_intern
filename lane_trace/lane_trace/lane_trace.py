@@ -171,7 +171,7 @@ _v3_track = {}
 def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
                    y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
                    k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=120.0, join_px=40.0, join_k=0.3,
-                   track_frames=15):
+                   track_frames=15, steer_max=0.4):
     """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
     흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
@@ -257,7 +257,7 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
                          'sides': ''.join(sorted(fits)), 'l_min': l_min})
     # +rad = 오른쪽: 중앙이 기준보다 오른쪽(차가 왼쪽으로 밀림) / 소실점이 오른쪽(차가 왼쪽을 봄)이면 오른쪽으로
     steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_vp - guide_vp)
-    return overlay, mask, float(np.clip(steering_rad, -0.4, 0.4))
+    return overlay, mask, float(np.clip(steering_rad, -steer_max, steer_max))
 
 
 def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027,
@@ -483,11 +483,11 @@ class LaneMaskingNode(Node):
         for n, v in (('guide_x_v3', 289.0), ('guide_vp_v3', 296.0), ('a_rad_v3', 0.003), ('b_rad_v3', 0.004),
                      ('open_k_v3', 7), ('roi_top_v3', 40), ('roi_bot_v3', 320), ('y_eval_v3', 300),
                      ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
-                     ('l_rel_v3', 0.6), ('l_floor_v3', 60)):
+                     ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
-                   'l_rel_v3', 'l_floor_v3')}
+                   'l_rel_v3', 'l_floor_v3', 'steer_max_v3')}
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -565,7 +565,7 @@ class LaneMaskingNode(Node):
                 b_rad=float(v3['b_rad_v3']), l_min=self.l_min, s_max=self.s_max, open_k=int(v3['open_k_v3']),
                 detector=3, roi_top=int(v3['roi_top_v3']), roi_bot=int(v3['roi_bot_v3']), y_eval=int(v3['y_eval_v3']),
                 lane_width=float(v3['lane_width_v3']), vp_y=float(v3['vp_y_v3']),
-                l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']))
+                l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']), steer_max=float(v3['steer_max_v3']))
         else:
             result_img, mask_img, steer_rad = lane_detect(
                 image, guide_x, guide_slope,

@@ -8,7 +8,7 @@ import numpy as np
 import time
 import cv2
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, UInt8
 from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 
@@ -531,6 +531,9 @@ class LaneMaskingNode(Node):
         # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
         self.v3_int = 0.0
         self.v3_int_t = None
+        # 자동(AUTO=1) 모드에서만 적분을 쌓음: 서 있는 동안 쌓이면 출발하자마자 한쪽으로 꺾음(10/19)
+        self.drive_mode = None
+        self.mode_sub = self.create_subscription(UInt8, '/drive_mode', self._mode_cb, 10)
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -557,6 +560,9 @@ class LaneMaskingNode(Node):
             # 안 버리면 최근 1초 검출률이 기준 아래라 넘겨받자마자 0.3초쯤 멈춤(10/17 18차)
             self.detect_hist = []
         self.lane_changing = bool(msg.data)
+
+    def _mode_cb(self, msg):
+        self.drive_mode = int(msg.data)
 
     def lane_mirror_callback(self, msg):
         if bool(msg.data) != self.lane_mirror:
@@ -631,7 +637,7 @@ class LaneMaskingNode(Node):
                 y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None)
             now_i = time.time()
             ki = float(v3['ki_v3'])
-            if self.lane_changing or ki <= 0.0:
+            if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:
                 self.v3_int = 0.0  # 차선 변경 중(obs_evade가 조향)에는 쌓지 않음
             elif steer_rad is not None and self.v3_int_t is not None:
                 dt = min(0.2, now_i - self.v3_int_t)

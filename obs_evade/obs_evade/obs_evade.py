@@ -71,6 +71,9 @@ class ObstacleEvasionNode(Node):
         self.declare_parameter('start_len_px', 450.0)
         self.declare_parameter('start_frames', 15)
         self.declare_parameter('cam_turn_max_s_l2', -1.0)
+        # True면 1→2 변경을 2→1과 똑같은 절차로 하되 영상(lane_trace)과 조향 방향만 좌우 반전(원본 cam_lane_auto 방식).
+        # 1→2 전용 값(*_l2 시간·기울기)은 안 쓰고 2→1 값(*_l1)을 그대로 씀. False면 10/17 방식(1→2를 따로 맞춘 값)(10/19)
+        self.declare_parameter('mirror_to_lane2', True)
         # 전방 장애물 감지 구역(라이다 기준 정면은 -x): 거리 roi_near~roi_far(m), 좌우 ±roi_half_width(m)
         self.declare_parameter('roi_near', 1.0)
         self.declare_parameter('roi_far', 1.15)
@@ -119,6 +122,7 @@ class ObstacleEvasionNode(Node):
         self.SIDE_MIN_POINTS, self.SIDE_CLEAR_SCANS = int(gp('side_min_points')), int(gp('side_clear_scans'))
         self.PASS_TIMEOUT = float(gp('pass_timeout_s'))
         self.REARM_DELAY = float(gp('rearm_delay_s'))
+        self.MIRROR = bool(gp('mirror_to_lane2'))
         if self.MODE not in ('return', 'toggle'):
             raise ValueError("mode는 'return' 또는 'toggle'")
         if self.CHANGE_MODE not in ('camera', 'timed'):
@@ -154,6 +158,8 @@ class ObstacleEvasionNode(Node):
         self.flag_pub = self.create_publisher(Bool, 'lane_change_flag', 10)
         # 차선 변경 중이면 True: lane_trace가 이 동안 인식 조건을 완화해 새 차선의 선을 일찍 잡음
         self.changing_pub = self.create_publisher(Bool, '/lane_changing', 10)
+        # 1→2 변경 중(mirror_to_lane2)이면 True: lane_trace가 영상을 좌우 반전하고 2→1 변경 때의 인식 조건을 씀
+        self.mirror_pub = self.create_publisher(Bool, '/lane_mirror', 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.detected_sub = self.create_subscription(Bool, '/lane_detected', self.detected_callback, 10)
         self.slope_sub = self.create_subscription(Float32, '/lane_slope', self.slope_callback, 10)
@@ -266,6 +272,7 @@ class ObstacleEvasionNode(Node):
         flag_msg = Bool()
         flag_msg.data = self.state in (TO_LANE1, LANE1)
         self.changing_pub.publish(Bool(data=self.state in (TO_LANE1, TO_LANE2)))
+        self.mirror_pub.publish(Bool(data=self.MIRROR and self.state == TO_LANE2))
         self.flag_pub.publish(flag_msg)
 
         # 양쪽 차선이 다 막혔으면 정지 명령(/cmd_obs는 decision_auto에서 차선 추종보다 우선)
@@ -280,24 +287,26 @@ class ObstacleEvasionNode(Node):
         sign = 1.0 if self.state == TO_LANE1 else -1.0  # 오른쪽 변경은 조향 부호 반대
         elapsed = time.time() - self.state_start
         next_state = LANE1 if self.state == TO_LANE1 else LANE2
+        # 시간·기울기 값을 고를 차선. 반전 방식이면 1→2도 2→1(LANE1) 값을 그대로 씀 (조향 부호만 sign으로 반대)
+        pk = LANE1 if self.MIRROR else next_state
 
         if self.CHANGE_MODE == 'camera':
             if self.straighten_start is not None:
                 # 정면 복귀: 반대로 꺾다가 선 기울기가 기준에 들어오거나 지나치면 lane_trace에 넘김
                 st_elapsed = time.time() - self.straighten_start
-                target = self.STRAIGHTEN_SLOPE[next_state]
+                target = self.STRAIGHTEN_SLOPE[pk]
                 fresh = time.time() - self.last_slope_t < 0.3 and self.last_slope >= 0.0
                 if fresh:
                     err = self.last_slope - target
                     if self.straighten_err0 is None:
                         self.straighten_err0 = np.sign(err)
-                    if abs(err) < self.STRAIGHTEN_TOL_BY[next_state] or np.sign(err) != self.straighten_err0:
+                    if abs(err) < self.STRAIGHTEN_TOL_BY[pk] or np.sign(err) != self.straighten_err0:
                         self.get_logger().warn(f'Straightened in {st_elapsed:.1f}s (slope {self.last_slope:.2f}, '
                                                f'target {target:.2f}) -> lane_trace')
                         self.set_state(next_state)
                         return
-                if st_elapsed > self.STRAIGHTEN_MAX_BY[next_state]:
-                    self.get_logger().error(f'Not straightened within {self.STRAIGHTEN_MAX_BY[next_state]}s '
+                if st_elapsed > self.STRAIGHTEN_MAX_BY[pk]:
+                    self.get_logger().error(f'Not straightened within {self.STRAIGHTEN_MAX_BY[pk]}s '
                                             f'-> handing over anyway')
                     self.set_state(next_state)
                     return
@@ -309,8 +318,8 @@ class ObstacleEvasionNode(Node):
                 return
             if self.cross_start is not None:
                 # 새 선을 잡은 뒤 직진: 새 차선 안쪽으로 더 들어간 다음 정면 복귀
-                if time.time() - self.cross_start >= self.CAM_CROSS_S[next_state]:
-                    self.get_logger().warn(f'Crossed for {self.CAM_CROSS_S[next_state]:.1f}s -> straightening')
+                if time.time() - self.cross_start >= self.CAM_CROSS_S[pk]:
+                    self.get_logger().warn(f'Crossed for {self.CAM_CROSS_S[pk]:.1f}s -> straightening')
                     self.straighten_start = time.time()
                     return
                 twist_msg = Twist()
@@ -318,22 +327,22 @@ class ObstacleEvasionNode(Node):
                 twist_msg.angular.z = 0.0
                 self.cmd_obs_pub.publish(twist_msg)
                 return
-            if self.cam_found_count >= self.CAM_FOUND_FRAMES and elapsed >= self.CAM_MIN_BY[next_state]:
-                if self.CAM_CROSS_S[next_state] > 0.0:
+            if self.cam_found_count >= self.CAM_FOUND_FRAMES and elapsed >= self.CAM_MIN_BY[pk]:
+                if self.CAM_CROSS_S[pk] > 0.0:
                     self.get_logger().warn(f'New lane line found in {elapsed:.1f}s -> crossing straight')
                     self.cross_start = time.time()
                 else:
                     self.get_logger().warn(f'New lane line found in {elapsed:.1f}s -> straightening')
                     self.straighten_start = time.time()
                 return
-            if elapsed > self.CAM_MAX_BY[next_state]:
-                self.get_logger().error(f'New lane line not found within {self.CAM_MAX_BY[next_state]}s '
+            if elapsed > self.CAM_MAX_BY[pk]:
+                self.get_logger().error(f'New lane line not found within {self.CAM_MAX_BY[pk]}s '
                                         f'(previous line lost: {self.cam_lost_seen}) -> handing over anyway')
                 self.set_state(next_state)
                 return
             twist_msg = Twist()
             twist_msg.linear.x = self.MAX_SPEED * self.CHANGE_SPEED
-            turn_max = self.CAM_TURN_MAX[next_state]
+            turn_max = self.CAM_TURN_MAX[pk]
             if 0.0 <= turn_max <= elapsed:
                 twist_msg.angular.z = 0.0  # 정해진 각도까지 돌았으면 직진하며 새 선을 찾음
             else:

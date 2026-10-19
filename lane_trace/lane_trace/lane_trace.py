@@ -383,6 +383,9 @@ class LaneMaskingNode(Node):
             Image, '/cam_lane/image_raw', self.image_callback, qos_profile_sensor_data)
         self.lane_change_sub = self.create_subscription(Bool, '/lane_change_flag', self.lane_change_callback, 10)
         self.lane_changing_sub = self.create_subscription(Bool, '/lane_changing', self.lane_changing_callback, 10)
+        # obs_evade가 1→2 변경을 2→1의 좌우 반전으로 할 때 True: 영상·조향을 반전하고 2→1 변경 때의 조건을 씀(10/19)
+        self.lane_mirror_sub = self.create_subscription(Bool, '/lane_mirror', self.lane_mirror_callback, 10)
+        self.lane_mirror = False
         self.cmd_pub = self.create_publisher(Twist, '/cmd_lane', 10)
         # 이번 프레임에서 선을 찾았는지 (obs_evade가 차선 변경 완료를 판단하는 데 씀)
         self.detected_pub = self.create_publisher(Bool, '/lane_detected', 10)
@@ -401,6 +404,12 @@ class LaneMaskingNode(Node):
             self.detect_hist = []
         self.lane_changing = bool(msg.data)
 
+    def lane_mirror_callback(self, msg):
+        if bool(msg.data) != self.lane_mirror:
+            self.get_logger().info(f'lane_mirror -> {msg.data}')
+            self.steer_hist = []  # 반전 전후 조향은 부호가 반대라 섞이면 안 됨
+        self.lane_mirror = bool(msg.data)
+
     def lane_change_callback(self, msg):
         if msg.data != self.lane_change_flag:
             self.get_logger().info(f'lane_change_flag -> {msg.data} ({"lane 1" if msg.data else "lane 2"})')
@@ -414,8 +423,9 @@ class LaneMaskingNode(Node):
         if image.shape[1] != 640 or image.shape[0] != 480:
             image = cv2.resize(image, (640, 480), interpolation=cv2.INTER_LINEAR)
 
-        in_lane1 = self.lane_change_flag is True
-        flip = in_lane1 and self.flip_on_lane_change
+        # 반전 중(1→2 변경)에는 뒤집힌 영상이 2→1 변경과 같아 보이므로 1차선 쪽 조건(2→1 변경 값)을 씀
+        in_lane1 = self.lane_change_flag is True or self.lane_mirror
+        flip = (in_lane1 and self.flip_on_lane_change) or self.lane_mirror
         if flip:
             image = cv2.flip(image, 1) # 이미지 반전
         if self.lane_changing:

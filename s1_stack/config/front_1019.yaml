@@ -1,0 +1,13 @@
+# 10/19~ 차선 카메라를 오른쪽 → 정면으로 옮긴 뒤의 설정 (도경윤)
+# 실행:
+#   taskset -c 0-5 ros2 run lane_trace lane_trace --ros-args --params-file <이 파일>
+#
+# 속도: linear_speed 1.0 × th_scale 1000(s1_stack.yaml) → PWM 180 (S1 펌웨어 상한)
+#
+# 차선 기준값(guide_x/guide_slope, ROI 등)은 카메라를 옮겨서 obstacle_1017.yaml 값이 맞지 않음.
+# 정면 카메라로 녹화한 bag을 보고 다시 맞출 예정 — 그 전에는 자동 주행하지 말 것.
+# obs_evade 시간 값(cam_*_s 등)도 카메라 위치와 속도가 바뀌어 다시 맞춰야 함.
+
+lane_masking_node:            # lane_trace 노드 이름
+  ros__parameters:
+    linear_speed: 1.0

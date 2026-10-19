@@ -170,12 +170,13 @@ _v3_track = {}
 
 def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
                    y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
-                   k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=120.0, join_px=40.0, join_k=0.3,
+                   k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=80.0, max_jump_cold=200.0, join_px=40.0, join_k=0.3,
                    track_frames=15, steer_max=0.4):
     """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
     흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
-    쪽마다 직전 프레임 선 위치(없으면 기준 위치 guide_x ∓ lane_width/2)에 가장 가까운 후보 하나를 고르고(max_jump 안),
+    쪽마다 직전 프레임 선 위치(없으면 기준 위치 guide_x ∓ lane_width/2)에 가장 가까운 후보 하나를 고르고(추적 중 max_jump,
+    처음·놓친 뒤엔 max_jump_cold 안: 커브에서는 선이 직선 기준 위치보다 140px쯤 안쪽에 있음),
     그 선과 한 줄에 있는 토막(점선, join_px·join_k 안)만 묶어 맞춤 — 옆 차로 선이 섞이지 않게(10/19 1차 주행: 왼쪽 위에
     들어온 1차선 바깥 선이 점선과 섞여 중앙을 오른쪽으로 잘못 잡고 왼쪽으로 꺾어 점선을 넘음).
     조향(+ = 오른쪽) = b_rad × (y_eval 위치 차로 중앙 − guide_x) + a_rad × (소실점 x − guide_vp).
@@ -216,7 +217,7 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         expect = tr[0] if tracked else guide_x + sign * lane_width / 2.0
         if tr is not None:
             _v3_track[s] = (tr[0], tr[1], tr[2] + 1)
-        near = [c for c in cands[s] if abs(c['x'] - expect) < max_jump]
+        near = [c for c in cands[s] if abs(c['x'] - expect) < (max_jump if tracked else max_jump_cold)]
         for c in cands[s]:
             overlay[c['ys'], c['xs']] = (128, 128, 128)
         if not near:

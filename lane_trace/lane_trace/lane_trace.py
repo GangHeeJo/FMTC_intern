@@ -253,7 +253,7 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
                    k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=80.0, max_jump_cold=200.0, join_px=40.0, join_k=0.3,
                    track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0, fit_top=None, y_look=None,
                    chain_px=40.0, chain_gap=150.0, chain_k=1.2, curve_span=150.0, y_look_curve=None, single_k_max=9.0,
-                   min_bottom=None):
+                   min_bottom=None, a_rad_curve=None):
     """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
     흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
@@ -418,6 +418,10 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         use_q = ('R' in fits and 'R' in quads and 'L' not in fits) or ('L' in fits and 'L' in quads and 'R' not in fits)
         if use_q and y_look_curve is not None:
             y_look = y_look_curve
+            # 커브(곡선으로 맞춤)에서는 먼 쪽 가중치를 따로: y_eval(300)도 차보다 앞이라 휜 실선에 맞추면 차 자체는 안쪽에
+            # 있게 되는데, 먼 쪽 항이 조향 대부분(0.22~0.28 rad)을 내 차가 그 자리에 머묾 → 줄이면 바깥(실선 쪽)으로(10/19)
+            if a_rad_curve is not None:
+                a_rad = a_rad_curve
         half = lane_width / 2.0 * (y_look - vp_y) / (y_eval - vp_y)
         if 'L' in fits and 'R' in fits:
             x_look = (at(fits['L'], y_look) + at(fits['R'], y_look)) / 2.0
@@ -665,13 +669,13 @@ class LaneMaskingNode(Node):
                      ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
                      ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12),
                      ('track_frames_v3', 15), ('y_look_curve_v3', -1), ('int_gate_v3', 1.0), ('single_k_max_v3', 9.0),
-                     ('min_bottom_v3', -1)):
+                     ('min_bottom_v3', -1), ('a_rad_curve_v3', -1.0)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
                    'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3', 'track_frames_v3',
-                   'y_look_curve_v3', 'int_gate_v3', 'single_k_max_v3', 'min_bottom_v3')}
+                   'y_look_curve_v3', 'int_gate_v3', 'single_k_max_v3', 'min_bottom_v3', 'a_rad_curve_v3')}
         # 방식 3 적분 보정: 차가 한쪽으로 끌려(10/19: 2차선·1차선 모두 계속 오른쪽 보정이 필요) 목표보다 실선 쪽에서
         # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
         self.v3_int = 0.0
@@ -795,7 +799,8 @@ class LaneMaskingNode(Node):
                 # 1차선에서만: 2차선 왼쪽 커브(장애물 지난 뒤)에서는 오른쪽 실선이 정상으로 1.47~1.7까지 누워
                 # 버려지면 차선을 놓쳐 멈춤(bag_obs_190819, 10/19)
                 single_k_max=float(v3['single_k_max_v3']) if in_lane1 else 9.0,
-                min_bottom=int(v3['min_bottom_v3']) if int(v3['min_bottom_v3']) >= 0 else None)
+                min_bottom=int(v3['min_bottom_v3']) if int(v3['min_bottom_v3']) >= 0 else None,
+                a_rad_curve=float(v3['a_rad_curve_v3']) if float(v3['a_rad_curve_v3']) >= 0 else None)
             now_i = time.time()
             ki = float(v3['ki_v3'])
             if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:

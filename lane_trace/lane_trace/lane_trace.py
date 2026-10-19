@@ -624,20 +624,22 @@ class LaneMaskingNode(Node):
 
         if detector == 3:
             v3 = self.v3
-            # 반전 영상(1차선)의 기준값: 카메라가 차 중심에서 비켜 달려 2차선 값을 그대로 쓰면 차가 실선 쪽으로 붙음(10/19
-            # 회피 3차: 1차선에서 실선에 거리 없이 주행). 음수면 2차선 값 그대로
+            # 1차선 기준값(lane_change_flag=True). 반전하면 카메라 비켜 달림 때문에 따로 줘야 하고(10/19 회피 3차),
+            # 반전 없이 점선을 따라갈 때도 2차선(실선 쪽 30px)과 목표가 다름. 음수면 2차선 값 그대로
             gx, gvp = float(v3['guide_x_v3']), float(v3['guide_vp_v3'])
-            if flip and float(v3['guide_x_v3_l1']) >= 0:
+            if self.lane_change_flag is True and float(v3['guide_x_v3_l1']) >= 0:
                 gx = float(v3['guide_x_v3_l1'])
-            if flip and float(v3['guide_vp_v3_l1']) >= 0:
+            if self.lane_change_flag is True and float(v3['guide_vp_v3_l1']) >= 0:
                 gvp = float(v3['guide_vp_v3_l1'])
+            # 차선 변경 중에는 대신 따라갈 선(R+의 L)을 안 씀: obs_evade가 '원래 선 사라짐 → 새 선 잡힘'을 /lane_detected로 봄
+            sides_eff = 'R' if (self.lane_changing and str(v3['sides_v3']) == 'R+') else str(v3['sides_v3'])
             result_img, mask_img, steer_rad = lane_detect(
                 image, gx, gvp, a_rad=float(v3['a_rad_v3']),
                 b_rad=float(v3['b_rad_v3']), l_min=self.l_min, s_max=self.s_max, open_k=int(v3['open_k_v3']),
                 detector=3, roi_top=int(v3['roi_top_v3']), roi_bot=int(v3['roi_bot_v3']), y_eval=int(v3['y_eval_v3']),
                 lane_width=float(v3['lane_width_v3']), vp_y=float(v3['vp_y_v3']),
                 l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']), steer_max=float(v3['steer_max_v3']),
-                sides=str(v3['sides_v3']), k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']),
+                sides=sides_eff, k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']),
                 fit_top=int(v3['fit_top_v3']) if int(v3['fit_top_v3']) >= 0 else None,
                 y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None,
                 track_frames=int(v3['track_frames_v3']))

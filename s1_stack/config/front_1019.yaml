@@ -143,3 +143,8 @@ decision_auto:
     stop_line_mode: true
     stop_line_y: 320.0        # 사용자가 세운 정지 위치에서 정지선 y 326~330(bag_cw_191703). 미는 거리 보고 조정
     cw_pass_s: 5.0
+
+sign_detect:
+  ros__parameters:
+    # 10/19 정지선 앞: 켜진 빨강·노랑·초록 0.91~0.92, 꺼진 신호등을 빨강·노랑으로 잘못 봄 0.21~0.46 → 0.6
+    light_conf: 0.6

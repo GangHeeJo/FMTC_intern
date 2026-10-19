@@ -27,6 +27,9 @@ class VisionPercept(Node):
             raise FileNotFoundError(f'YOLO model_path is not a file: {model_path}')
 
         self.declare_parameter('debug_view', False)
+        # 빨간·노란불 확신도 기준. 10/19 정지선 앞(앞 카메라): 켜진 불 0.91~0.92, 꺼진 신호등을 빨강·노랑으로 잘못 봄 0.21~0.46
+        self.declare_parameter('light_conf', 0.3)
+        self.light_conf = float(self.get_parameter('light_conf').value)
         self.debug_view = self.get_parameter('debug_view').get_parameter_value().bool_value
 
         self.model = YOLO(str(model_path))
@@ -80,7 +83,7 @@ class VisionPercept(Node):
                     current_cw_detected = True
 
             # 2. 신호등 판단 (Red: 2, Yellow: 3)
-            elif cls in [2, 3] and conf > 0.3:
+            elif cls in [2, 3] and conf > self.light_conf:
                 size = (coords[2] - coords[0]) * (coords[3] - coords[1])
                 if size >= self.min_bbox_size:
                     current_tl_detected = True

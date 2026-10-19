@@ -252,7 +252,8 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
                    y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
                    k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=80.0, max_jump_cold=200.0, join_px=40.0, join_k=0.3,
                    track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0, fit_top=None, y_look=None,
-                   chain_px=40.0, chain_gap=150.0, chain_k=1.2, curve_span=150.0, y_look_curve=None, single_k_max=9.0):
+                   chain_px=40.0, chain_gap=150.0, chain_k=1.2, curve_span=150.0, y_look_curve=None, single_k_max=9.0,
+                   min_bottom=None):
     """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
     흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
@@ -361,6 +362,12 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
             cv2.polylines(overlay, [np.column_stack([np.polyval(quads[s], qy), qy]).astype(np.int32).reshape(-1, 1, 2)],
                           False, (255, 0, 255), 2)
         xs = np.concatenate([c['xs'] for c in group]); ys = np.concatenate([c['ys'] for c in group])
+        # 화면 위쪽 짧은 조각만 보이면(아래로 min_bottom px까지 안 내려옴, 커브로 길게 이어진 것도 아님) 안 씀 → 놓친 것.
+        # 10/19 bag_full_195517 110.7초: 마지막 커브에서 실선이 옆 회색 띠와 붙어 굵기로 빠지고 먼 쪽 조각(y 60~90)만 남아
+        # 곧게 늘리니 중앙이 오른쪽으로 크게 벗어나 오른쪽 최대로 0.3초 꺾음
+        if min_bottom is not None and ys.max() < min_bottom and np.ptp(cy_all) < curve_span:
+            quads.pop(s, None)
+            continue
         if fit_top is not None and np.sum(ys >= fit_top) >= 20:
             xs, ys = xs[ys >= fit_top], ys[ys >= fit_top]
         k, b = np.polyfit(ys, xs, 1)
@@ -657,13 +664,14 @@ class LaneMaskingNode(Node):
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
                      ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
                      ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12),
-                     ('track_frames_v3', 15), ('y_look_curve_v3', -1), ('int_gate_v3', 1.0), ('single_k_max_v3', 9.0)):
+                     ('track_frames_v3', 15), ('y_look_curve_v3', -1), ('int_gate_v3', 1.0), ('single_k_max_v3', 9.0),
+                     ('min_bottom_v3', -1)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
                    'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3', 'track_frames_v3',
-                   'y_look_curve_v3', 'int_gate_v3', 'single_k_max_v3')}
+                   'y_look_curve_v3', 'int_gate_v3', 'single_k_max_v3', 'min_bottom_v3')}
         # 방식 3 적분 보정: 차가 한쪽으로 끌려(10/19: 2차선·1차선 모두 계속 오른쪽 보정이 필요) 목표보다 실선 쪽에서
         # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
         self.v3_int = 0.0
@@ -786,7 +794,8 @@ class LaneMaskingNode(Node):
                 y_look_curve=int(v3['y_look_curve_v3']) if int(v3['y_look_curve_v3']) >= 0 else None,
                 # 1차선에서만: 2차선 왼쪽 커브(장애물 지난 뒤)에서는 오른쪽 실선이 정상으로 1.47~1.7까지 누워
                 # 버려지면 차선을 놓쳐 멈춤(bag_obs_190819, 10/19)
-                single_k_max=float(v3['single_k_max_v3']) if in_lane1 else 9.0)
+                single_k_max=float(v3['single_k_max_v3']) if in_lane1 else 9.0,
+                min_bottom=int(v3['min_bottom_v3']) if int(v3['min_bottom_v3']) >= 0 else None)
             now_i = time.time()
             ki = float(v3['ki_v3'])
             if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:

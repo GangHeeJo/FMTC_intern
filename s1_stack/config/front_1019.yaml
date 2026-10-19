@@ -141,10 +141,13 @@ decision_auto:
     # 신호등은 앞 카메라 sign_detect(/light_stop)만. 앞 카메라 YOLO 횡단보도(/cross_stop)는 안 씀
     require_signals: true
     stop_line_mode: true
-    stop_line_y: 320.0        # 사용자가 세운 정지 위치에서 정지선 y 326~330(bag_cw_191703). 미는 거리 보고 조정
+    stop_line_y: 300.0        # 정지 위치에서 정지선 y 326~330(bag_cw_191703). 비스듬히 다가가면 301 다음에 사라짐(bag_full_193634) → 300
+    stop_line_near_y: 260.0   # 여기까지 내려온 뒤 사라지면 도착으로 봄
     cw_pass_s: 5.0
 
 sign_detect:
   ros__parameters:
     # 10/19 정지선 앞: 켜진 빨강·노랑·초록 0.91~0.92, 꺼진 신호등을 빨강·노랑으로 잘못 봄 0.21~0.46 → 0.6
     light_conf: 0.6
+    # 정지선이 거리를 맡으므로 크게 낮춤(bag_full_193634: 정지선 2 m쯤 앞에서 3924, 15500은 1초 이상 늦음)
+    min_bbox_size: 2000

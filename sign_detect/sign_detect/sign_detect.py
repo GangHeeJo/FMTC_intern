@@ -43,7 +43,10 @@ class VisionPercept(Node):
 
         # 설정값
         self.img_width = 640
-        self.min_bbox_size = 15500
+        # 신호등 상자 최소 넓이(px²). 예전 보닛 카메라에서 신호등까지 거리를 대신하던 값.
+        # 10/19 정지선 모드에서는 정지선이 거리를 맡음(bag_full_193634: 96초 3924부터 빨강 0.88인데 15500 때문에 97.7초에야 인정)
+        self.declare_parameter('min_bbox_size', 15500)
+        self.min_bbox_size = int(self.get_parameter('min_bbox_size').value)
         self.bbox_center_bound = [0.1, 0.9]
 
         # Pub/Sub

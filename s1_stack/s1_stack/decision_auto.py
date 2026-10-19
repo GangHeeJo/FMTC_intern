@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32
 from geometry_msgs.msg import Twist
+from collections import deque
 
 class MotionDecision(Node):
     def __init__(self):
@@ -23,14 +24,19 @@ class MotionDecision(Node):
         self.declare_parameter('stop_line_mode', False)
         self.declare_parameter('stop_line_y', 320.0)        # 640x480 화면. 10/19 사용자가 세운 정지 위치에서 326~330
         self.declare_parameter('stop_line_timeout_s', 0.5)
-        self.declare_parameter('stop_line_lost_s', 2.0)     # 정지선에서 이만큼 정지선을 못 보면 대기 상태로 되돌림
+        self.declare_parameter('stop_line_far_y', 200.0)    # 정지선 상태에서 정지선이 이보다 위(멀리)에 보이면 대기로 되돌림
+        # 정지선이 이 높이까지 내려온 뒤(직전 1초에 3번 이상 잡힘) 안 보이게 되면 보닛 아래로 들어간 것 → 도착으로 봄
+        # (bag_full_193634: 비스듬히 다가가며 y 256 → 301 다음 프레임부터 사라짐)
+        self.declare_parameter('stop_line_near_y', 260.0)
         self.declare_parameter('cw_pass_s', 5.0)
         gp = lambda n: self.get_parameter(n).value
         self.stop_line_mode = bool(gp('stop_line_mode'))
         self.stop_line_th = float(gp('stop_line_y'))
         self.stop_line_timeout = float(gp('stop_line_timeout_s'))
-        self.stop_line_lost = float(gp('stop_line_lost_s'))
+        self.stop_line_far = float(gp('stop_line_far_y'))
         self.cw_pass = float(gp('cw_pass_s'))
+        self.stop_line_near = float(gp('stop_line_near_y'))
+        self.line_hist = deque(maxlen=60)   # 최근 정지선 검출 (시각, y)
         self.stop_line_y = -1.0
         self.last_stop_line_time = None
         self.last_line_seen = 0.0
@@ -79,19 +85,29 @@ class MotionDecision(Node):
     def stop_line_cb(self, msg):
         self.stop_line_y = float(msg.data)
         self.last_stop_line_time = self.get_clock().now().nanoseconds / 1e9
+        if self.stop_line_y >= 0.0:
+            self.line_hist.append((self.last_stop_line_time, self.stop_line_y))
 
     def update_crosswalk(self, now, fresh):
         """정지선 모드 상태 갱신. 지금 정지선에서 서야 하면 True"""
         line_now = fresh(self.last_stop_line_time, self.stop_line_timeout) and self.stop_line_y >= 0.0
         if line_now:
             self.last_line_seen = now
-        if self.cw_state == 'wait' and line_now and self.stop_line_y >= self.stop_line_th:
+        recent = [y for t, y in self.line_hist if now - t < 1.0]
+        if self.cw_state == 'wait' and line_now and self.stop_line_y >= self.stop_line_th and len(recent) >= 2:
             self.cw_state = 'at_line'
             self.get_logger().warn(f'Stop line reached (y {self.stop_line_y:.0f})')
+        elif (self.cw_state == 'wait' and not line_now and len(recent) >= 3 and self.line_hist
+              and now - self.line_hist[-1][0] < self.stop_line_timeout and self.line_hist[-1][1] >= self.stop_line_near):
+            self.cw_state = 'at_line'
+            self.last_line_seen = now
+            self.get_logger().warn(f'Stop line went under the view (last y {self.line_hist[-1][1]:.0f}) -> reached')
         if self.cw_state == 'at_line':
-            if now - self.last_line_seen > self.stop_line_lost:
+            # 정지선이 보닛 아래로 들어가 안 보여도 계속 정지선 상태(서 있는 동안 못 봄, 10/19). 먼 곳(y < stop_line_far_y)에
+            # 정지선이 다시 보이면(차를 뒤로 옮김) 대기 상태로 되돌림
+            if line_now and self.stop_line_y < self.stop_line_far:
                 self.cw_state = 'wait'
-                self.get_logger().warn('Stop line lost -> waiting for stop line')
+                self.get_logger().warn(f'Stop line far again (y {self.stop_line_y:.0f}) -> waiting for stop line')
             elif not fresh(self.last_light_time, self.signal_timeout):
                 self.get_logger().warn('At stop line, no traffic light input - STOPPING', throttle_duration_sec=1.0)
                 return True

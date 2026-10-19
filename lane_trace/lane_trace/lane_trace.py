@@ -188,39 +188,60 @@ def line_features(image, s_max=30, open_k=7, roi_top=40, roi_bot=320, y_eval=300
     return out
 
 
-def crosswalk_detect(image, roi_top=60, roi_bot=420, th_rel=0.5, th_min=25, line_w=250, line_k=0.25, line_thick=30,
-                     z_min_area=250, z_min_h=20, z_need=3, z_gap=170):
+def crosswalk_detect(image, roi_top=60, roi_bot=350, th_rel=0.5, th_min=25, min_len=120, max_k=0.45,
+                     offsets=(20, 35, 50, 70, 95, 120, 150, 180), run_min=12, run_max=160, z_need=3,
+                     reg_w=5.0, reg_g=4.0, rows_need=2, nz_need=5):
     """상단 카메라 화면(640x480)에서 횡단보도 정지선 찾기(10/19). 반환: (정지선 y(x=320 높이) 또는 None, 줄무늬 수).
-    정지선 = 폭 line_w px 넘는 거의 가로(기울기 dy/dx ≤ line_k)의 얇은 흰 띠(면적/폭 ≤ line_thick) 중 차에 가장 가까운 것.
-    그 위(먼 쪽) z_gap px 안에 굵은 세로 줄무늬가 z_need개 이상 있어야 횡단보도로 봄(사다리 모양 상자·차선은 안 걸림).
-    조명 차이를 없애려 밝기(L)에 top-hat(61x61)을 씌우고, ROI 상위 0.5% 밝기의 th_rel배(최소 th_min)를 흰색으로.
-    bag_cw_191703(정지선 접근) y 147 → 327, 주행 녹화 bag_run_1725·1734·bag_obs_190819 1000장에서 잘못 인식 0"""
+    정지선 = Hough 직선(길이 ≥ min_len, 기울기 |dy/dx| ≤ max_k) 중 차에 가장 가까운 것(y ≤ roi_bot, 아래는 보닛).
+    덩어리 대신 직선으로 찾아서 비스듬히 다가갈 때 정지선이 줄무늬·경계선과 붙어도 잡힘(bag_full_193634).
+    줄무늬 = 정지선과 평행하게 offsets(px)만큼 위를 가로로 훑어 흰 띠(폭 run_min~run_max)를 셈. 너비(최대/최소 ≤ reg_w)와
+    간격(≤ reg_g)이 대충 고른 띠가 z_need개 이상인 줄이 rows_need개 이상이고, 가장 많은 줄이 nz_need개 이상이면 횡단보도.
+    횡단보도 천이 찌그러져 있어 조건을 크게 풀었음(사용자). 장애물 칸(가로선 + 흰 차)은 줄무늬가 많아야 4개라 nz_need 5로 거름.
+    조명 차이를 없애려 밝기(L)에 top-hat(61x61)을 씌우고, 상위 0.5% 밝기의 th_rel배(최소 th_min)를 흰색으로"""
     L = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)[..., 1]
     th = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (61, 61)))
-    t = max(th_min, th_rel * float(np.percentile(th[roi_top:roi_bot], 99.5)))
+    t = max(th_min, th_rel * float(np.percentile(th[roi_top:420], 99.5)))
     mask = (th > t).astype(np.uint8) * 255
     mask[:roi_top] = 0
-    mask[roi_bot:] = 0
+    mask[420:] = 0
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
-    lines, stripes = [], []
-    for i in range(1, n):
-        x, y, w, h, a = st[i]
-        if a < 150:
-            continue
-        if w >= line_w and a / w <= line_thick:
-            ys, xs = np.nonzero(lab == i)
-            k, b = np.polyfit(xs, ys, 1)
-            if abs(k) <= line_k:
-                lines.append(float(k * 320 + b))
+    lm = mask.copy()
+    lm[roi_bot:] = 0
+    segs = cv2.HoughLinesP(lm, 1, np.pi / 180, 80, minLineLength=min_len, maxLineGap=40)
+    best = None
+    if segs is not None:
+        for x1, y1, x2, y2 in segs[:, 0]:
+            if x2 == x1:
                 continue
-        if a >= z_min_area and h >= z_min_h and h >= 0.8 * w and w <= 90:
-            stripes.append(y + h)
-    if not lines:
+            k = (y2 - y1) / (x2 - x1)
+            if abs(k) > max_k:
+                continue
+            y320 = y1 + k * (320 - x1)
+            if best is None or y320 > best[0]:
+                best = (y320, k, x1, y1)
+    if best is None:
         return None, 0
-    ly = max(lines)
-    nz = sum(1 for yb in stripes if ly - z_gap <= yb <= ly - 5)
-    return (ly if nz >= z_need else None), nz
+    y320, k, x1, y1 = best
+    xs = np.arange(0, 640)
+    nz, n_ok = 0, 0
+    for o in offsets:
+        ys = np.round(y1 + k * (xs - x1) - o).astype(int)
+        ok = (ys >= roi_top) & (ys < 480)
+        if ok.sum() < 200:
+            continue
+        row = np.zeros(640, np.int8)
+        row[ok] = mask[ys[ok], xs[ok]] > 0
+        d = np.diff(np.concatenate([[0], row, [0]]))
+        st, en = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+        w = en - st
+        sel = (w >= run_min) & (w <= run_max)
+        ws, cs = w[sel], ((st + en) / 2)[sel]
+        if len(ws) >= 3:
+            gaps = np.diff(cs)
+            if ws.max() <= reg_w * ws.min() and gaps.max() <= reg_g * gaps.min():
+                nz = max(nz, len(ws))
+                n_ok += len(ws) >= z_need
+    return (float(y320) if n_ok >= rows_need and nz >= nz_need else None), nz
 
 
 # 방식 3 선 추적 상태: 쪽별 마지막 선 (y_eval 위치 x, 기울기 k, 몇 프레임 전에 봤는지)

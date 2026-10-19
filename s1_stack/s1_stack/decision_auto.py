@@ -25,6 +25,7 @@ class MotionDecision(Node):
         self.declare_parameter('stop_line_y', 320.0)        # 640x480 화면. 10/19 사용자가 세운 정지 위치에서 326~330
         self.declare_parameter('stop_line_timeout_s', 0.5)
         self.declare_parameter('stop_line_far_y', 200.0)    # 정지선 상태에서 정지선이 이보다 위(멀리)에 보이면 대기로 되돌림
+        self.declare_parameter('cw_line_recent_s', 1.0)    # 정지선을 이 시간 안에 봤으면 횡단보도 구간(/crosswalk_active)
         # 정지선이 이 높이까지 내려온 뒤(직전 1초에 3번 이상 잡힘) 안 보이게 되면 보닛 아래로 들어간 것 → 도착으로 봄
         # (bag_full_193634: 비스듬히 다가가며 y 256 → 301 다음 프레임부터 사라짐)
         self.declare_parameter('stop_line_near_y', 260.0)
@@ -34,6 +35,7 @@ class MotionDecision(Node):
         self.stop_line_th = float(gp('stop_line_y'))
         self.stop_line_timeout = float(gp('stop_line_timeout_s'))
         self.stop_line_far = float(gp('stop_line_far_y'))
+        self.cw_line_recent = float(gp('cw_line_recent_s'))
         self.cw_pass = float(gp('cw_pass_s'))
         self.stop_line_near = float(gp('stop_line_near_y'))
         self.line_hist = deque(maxlen=60)   # 최근 정지선 검출 (시각, y)
@@ -66,6 +68,8 @@ class MotionDecision(Node):
 
         # Publisher: 최종 제어 명령
         self.pub_auto = self.create_publisher(Twist, '/cmd_auto', 10)
+        # 횡단보도 구간(정지선 보임·정지선에서 대기·초록불에 지나는 중). obs_evade가 이동안 앞 장애물 감지를 쉼
+        self.pub_cw_active = self.create_publisher(Bool, '/crosswalk_active', 10)
 
         # 타이머 (10Hz)
         self.timer = self.create_timer(0.1, self.publish_decision)
@@ -151,14 +155,24 @@ class MotionDecision(Node):
             self.pub_auto.publish(msg)
             return
 
+        # 정지선 모드: 정지선에서 빨간·노란불이면 장애물 회피보다도 먼저 정지(10/19 bag_full_195127: 정지선에서 선 뒤
+        # 횡단보도 너머 구조물을 장애물로 잡아 빨간불에 차선 변경을 시작함). 횡단보도 구간이면 obs_evade에 알림
+        cw_stop = self.stop_line_mode and self.update_crosswalk(current_time, fresh)
+        if self.stop_line_mode:
+            recent_line = any(current_time - t < self.cw_line_recent for t, _ in self.line_hist)
+            self.pub_cw_active.publish(Bool(data=self.cw_state != 'wait' or recent_line))
+        if cw_stop:
+            msg.angular.z = self.current_lane_cmd.angular.z
+            msg.linear.x = 0.0
+            self.get_logger().info('STOP SIGNAL ACTIVE (stop line)')
+
         # [우선순위 1] 장애물 회피 명령 확인 (최근 0.2초 이내 수신된 경우만 유효)
-        if (current_time - self.last_obs_time) < 0.2:
+        elif (current_time - self.last_obs_time) < 0.2:
             msg = self.current_obs_cmd
             self.get_logger().info('PRIORITY: OBSTACLE EVASION ACTIVE')
-        
-        # [우선순위 2] 정지 조건 확인 (신호등 OR 횡단보도). 정지선 모드면 정지선에서 빨간·노란불일 때만
-        elif (self.update_crosswalk(current_time, fresh) if self.stop_line_mode
-              else (self.stop_by_light or self.stop_by_crosswalk)):
+
+        # [우선순위 2] 정지 조건 확인 (신호등 OR 횡단보도). 정지선 모드는 위에서 처리
+        elif not self.stop_line_mode and (self.stop_by_light or self.stop_by_crosswalk):
             msg.angular.z = self.current_lane_cmd.angular.z
             msg.linear.x = 0.0
             self.get_logger().info('STOP SIGNAL ACTIVE')

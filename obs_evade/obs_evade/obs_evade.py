@@ -206,6 +206,10 @@ class ObstacleEvasionNode(Node):
         self.slope_sub = self.create_subscription(Float32, '/lane_slope', self.slope_callback, 10)
         self.line_len_sub = self.create_subscription(Float32, '/lane_line_len', self.line_len_callback, 10)
         self.lines_sub = self.create_subscription(Float32MultiArray, '/lane_lines', self.lines_callback, 10)
+        # 횡단보도 구간(decision_auto /crosswalk_active)에서는 앞 장애물 감지를 쉼: 정지선에서 횡단보도 너머 구조물을
+        # 장애물로 잡아 빨간불에 차선 변경을 시작함(10/19 bag_full_195127)
+        self.cw_active_t = 0.0
+        self.cw_sub = self.create_subscription(Bool, '/crosswalk_active', self.cw_callback, 10)
         # 자동(AUTO=1) 모드에서만 장애물 감지. 수동으로 차를 옮기다 장애물에 다가가도 회피 상태로 넘어가지 않게(10/19:
         # 시험 사이에 obs_evade가 LANE1로 넘어가 있어 lane_trace가 2차선에서 반전 영상으로 1차선 실선을 찾음)
         self.drive_mode = None
@@ -256,6 +260,10 @@ class ObstacleEvasionNode(Node):
         if phase == len(V['x']) - 1:
             ok = ok or abs(k) <= abs(V['k_end'])
         return ok, (x, k)
+
+    def cw_callback(self, msg):
+        if msg.data:
+            self.cw_active_t = time.time()
 
     def mode_callback(self, msg):
         self.drive_mode = int(msg.data)
@@ -315,7 +323,7 @@ class ObstacleEvasionNode(Node):
         self.blocked = False
         # 모드를 모르면(cmd_mux는 바뀔 때만 알림) 감지 안 함: obs_run을 켠 뒤 A를 누르면 그때 알게 됨(10/19: 모드 모른 채
         # 차를 옮기는 동안 회피로 넘어감)
-        if self.drive_mode != 1:
+        if self.drive_mode != 1 or time.time() - self.cw_active_t < 0.5:
             self.obstacle_count = 0
         elif self.state in (LANE2, LANE1) and time.time() - self.state_start >= self.REARM_DELAY:
             roi_idx = (ahead > self.ROI_NEAR) & (ahead < self.ROI_FAR) & (np.abs(right) < self.ROI_HALF_W)

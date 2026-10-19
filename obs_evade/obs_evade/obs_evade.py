@@ -80,23 +80,25 @@ class ObstacleEvasionNode(Node):
         # True면 1→2 변경을 2→1과 똑같은 절차로 하되 영상(lane_trace)과 조향 방향만 좌우 반전(원본 cam_lane_auto 방식).
         # 1→2 전용 값(*_l2 시간·기울기)은 안 쓰고 2→1 값(*_l1)을 그대로 씀. False면 10/17 방식(1→2를 따로 맞춘 값)(10/19)
         self.declare_parameter('mirror_to_lane2', True)
-        # vision: 단계(change_steer 순서, 보통 [왼쪽 최대, 직진, 오른쪽 최대])를 시간 대신 상단 카메라의 선 위치로 넘김(10/19).
-        # lane_trace /lane_lines = 반전 안 한 화면의 흰 선 [x(y=300), 기울기 dx/dy, 길이]. 2→1 기준(bag_obs_183410):
-        #  1단계 끝: 차로 사이 점선(짧고 기울기 vis_div_k 범위)이 x ≥ vis_div_x  (2.5초 때 453)
-        #  2단계 끝: 1차선 왼쪽 실선(길이 ≥ vis_sol_len, 기울기 ≤ vis_sol_k = 많이 누움)이 x ≥ vis_sol_x  (4.5초 때 212, k -1.16)
-        #  3단계 끝: 왼쪽 실선(길이 ≥ vis_par_len)의 기울기 ≥ vis_par_k = 정면을 봄  (7.0초 때 -0.56~-0.62, 정상 -0.5)
-        # 1→2는 차로 정중앙(vis_center) 기준 좌우 반전한 같은 조건(x → 2·center − x, k → −k). 단계마다 최소·최대 시간
-        self.declare_parameter('vis_div_x', 450.0)
-        self.declare_parameter('vis_div_k', [-0.75, -0.2])
-        self.declare_parameter('vis_div_len_max', 200.0)
-        self.declare_parameter('vis_sol_x', 210.0)
-        self.declare_parameter('vis_sol_k', -0.9)
-        self.declare_parameter('vis_sol_len', 250.0)
-        self.declare_parameter('vis_par_k', -0.6)
-        self.declare_parameter('vis_par_len', 150.0)
-        self.declare_parameter('vis_center', 289.0)
-        self.declare_parameter('vis_min_s', [1.0, 0.5, 1.0])
-        self.declare_parameter('vis_max_s', [4.0, 3.5, 4.0])
+        # vision: 단계(change_steer 순서, 보통 [최대로 꺾기, 직진, 되꺾기])를 시간 대신 상단 카메라에 보이는 선 위치로 넘김.
+        # 기준 = 사용자 시험 bag_obs_190819(2→1 2.3-2.0-2.5초, 1→2 2.7-2.0-2.0초)에서 각 단계가 끝날 때의 화면(10/19).
+        # lane_trace /lane_lines = 반전 안 한 화면의 흰 선 [x(y=300), 기울기 dx/dy, 길이]. 길이 ≥ vis_len_min이고
+        # 기울기가 vis_to{1,2}_k 범위인 선 중 가장 긴 것 = 새 차선 쪽 실선(2→1은 1차선 왼쪽 실선, 1→2는 2차선 오른쪽 실선).
+        # 단계 i는 그 선의 x가 vis_to*_x[i]에 닿으면 끝(vis_to*_dir[i]: +1이면 x ≥, -1이면 x ≤).
+        # 마지막 단계(되꺾기)는 기울기가 vis_to*_k_end보다 정면 쪽(|k| ≤ |k_end|)이 돼도 끝: 차가 옆으로 더 갔으면
+        # 위치가 오기 전에 머리가 먼저 정면을 봄(bag_obs_190506·190124). 단계마다 vis_min_s 전에는 안 넘기고,
+        # 그 방향의 시간 기준(change_time_s / change_time_s_to_lane2) + vis_extra_s가 지나면 시간 초과로 넘김
+        self.declare_parameter('vis_len_min', 250.0)
+        self.declare_parameter('vis_to1_k', [-2.0, -0.3])
+        self.declare_parameter('vis_to1_x', [-95.0, 180.0, 95.0])
+        self.declare_parameter('vis_to1_dir', [1, 1, -1])
+        self.declare_parameter('vis_to1_k_end', -0.61)
+        self.declare_parameter('vis_to2_k', [0.3, 2.0])
+        self.declare_parameter('vis_to2_x', [604.0, 378.0, 495.0])
+        self.declare_parameter('vis_to2_dir', [-1, -1, 1])
+        self.declare_parameter('vis_to2_k_end', 0.66)
+        self.declare_parameter('vis_min_s', [1.5, 1.0, 1.0])
+        self.declare_parameter('vis_extra_s', 1.0)
         self.declare_parameter('vis_frames', 2)   # 조건이 이만큼 연속 맞아야 넘김
         # 전방 장애물 감지 구역(라이다 기준 정면은 -x): 거리 roi_near~roi_far(m), 좌우 ±roi_half_width(m)
         self.declare_parameter('roi_near', 1.0)
@@ -154,8 +156,9 @@ class ObstacleEvasionNode(Node):
         self.SIDE_REQUIRE_SEEN = bool(gp('side_require_seen'))
         self.REARM_DELAY = float(gp('rearm_delay_s'))
         self.MIRROR = bool(gp('mirror_to_lane2'))
-        self.VIS = {n: gp(n) for n in ('vis_div_x', 'vis_div_k', 'vis_div_len_max', 'vis_sol_x', 'vis_sol_k', 'vis_sol_len',
-                                       'vis_par_k', 'vis_par_len', 'vis_center', 'vis_min_s', 'vis_max_s', 'vis_frames')}
+        self.VIS = {n: gp(n) for n in ('vis_len_min', 'vis_min_s', 'vis_extra_s', 'vis_frames')}
+        self.VIS_BY = {st: {n: gp(f'vis_{d}_{n}') for n in ('k', 'x', 'dir', 'k_end')}
+                       for st, d in ((TO_LANE1, 'to1'), (TO_LANE2, 'to2'))}
         self.vis_lines = []       # [(x, k, len), ...] 마지막 /lane_lines
         self.vis_lines_t = 0.0
         self.vis_phase = 0        # vision 변경 단계(0, 1, 2)
@@ -241,23 +244,18 @@ class ObstacleEvasionNode(Node):
         self.vis_lines = [(d[i], d[i + 1], d[i + 2]) for i in range(0, len(d) - 2, 3)]
         self.vis_lines_t = time.time()
 
-    def vis_condition(self, phase, to_lane1):
-        """vision 단계 phase의 끝 조건이 지금 화면에서 맞는지. 1→2는 차로 정중앙 기준 좌우 반전"""
-        V = self.VIS
-        c = float(V['vis_center'])
-        ls = self.vis_lines if to_lane1 else [(2 * c - x, -k, l) for x, k, l in self.vis_lines]
-        if phase == 0:
-            k0, k1 = V['vis_div_k']
-            xs = [x for x, k, l in ls if k0 <= k <= k1 and l <= V['vis_div_len_max']]
-            return bool(xs) and max(xs) >= V['vis_div_x'], (max(xs) if xs else None)
-        if phase == 1:
-            xs = [x for x, k, l in ls if l >= V['vis_sol_len'] and k <= V['vis_sol_k']]
-            return bool(xs) and max(xs) >= V['vis_sol_x'], (max(xs) if xs else None)
-        cand = [(l, k) for x, k, l in ls if l >= V['vis_par_len'] and k < 0 and x > -100]
+    def vis_condition(self, phase):
+        """지금 화면에서 vision 단계 phase의 끝 조건이 맞는지, 그리고 본 값(x, k)"""
+        V = self.VIS_BY[self.state]
+        k0, k1 = V['k']
+        cand = [(l, x, k) for x, k, l in self.vis_lines if k0 <= k <= k1 and l >= self.VIS['vis_len_min']]
         if not cand:
             return False, None
-        k = max(cand)[1]  # 가장 긴 왼쪽 선
-        return k >= V['vis_par_k'], k
+        _, x, k = max(cand)
+        ok = (x - V['x'][phase]) * V['dir'][phase] >= 0
+        if phase == len(V['x']) - 1:
+            ok = ok or abs(k) <= abs(V['k_end'])
+        return ok, (x, k)
 
     def mode_callback(self, msg):
         self.drive_mode = int(msg.data)
@@ -372,11 +370,11 @@ class ObstacleEvasionNode(Node):
             ph = self.vis_phase
             pe = now - self.vis_phase_t
             fresh = now - self.vis_lines_t < 0.3
-            ok, val = self.vis_condition(ph, self.state == TO_LANE1) if fresh else (False, None)
+            ok, val = self.vis_condition(ph) if fresh else (False, None)
             self.vis_hits = self.vis_hits + 1 if (ok and pe >= self.VIS['vis_min_s'][ph]) else 0
-            timeout = pe >= self.VIS['vis_max_s'][ph]
+            timeout = pe >= self.CHANGE_TIME_BY[self.state][ph] + self.VIS['vis_extra_s']
             if self.vis_hits >= int(self.VIS['vis_frames']) or timeout:
-                why = f'시간 초과 {pe:.1f}s' if (timeout and self.vis_hits < int(self.VIS['vis_frames'])) else f'화면 조건 맞음 ({val:.2f})'
+                why = f'시간 초과 {pe:.1f}s' if (timeout and self.vis_hits < int(self.VIS['vis_frames'])) else f'화면 조건 맞음 (x {val[0]:.0f}, k {val[1]:.2f})'
                 self.get_logger().warn(f'{self.state} 단계 {ph + 1}/{len(self.CHANGE_STEER)} 끝: {why}, {pe:.1f}s')
                 self.vis_phase += 1
                 self.vis_phase_t = now

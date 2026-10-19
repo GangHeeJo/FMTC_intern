@@ -571,13 +571,13 @@ class LaneMaskingNode(Node):
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
                      ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
                      ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12),
-                     ('track_frames_v3', 15), ('y_look_curve_v3', -1)):
+                     ('track_frames_v3', 15), ('y_look_curve_v3', -1), ('int_gate_v3', 1.0)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
                    'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3', 'track_frames_v3',
-                   'y_look_curve_v3')}
+                   'y_look_curve_v3', 'int_gate_v3')}
         # 방식 3 적분 보정: 차가 한쪽으로 끌려(10/19: 2차선·1차선 모두 계속 오른쪽 보정이 필요) 목표보다 실선 쪽에서
         # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
         self.v3_int = 0.0
@@ -694,7 +694,8 @@ class LaneMaskingNode(Node):
             ki = float(v3['ki_v3'])
             if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:
                 self.v3_int = 0.0  # 차선 변경 중(obs_evade가 조향)에는 쌓지 않음
-            elif steer_rad is not None and self.v3_int_t is not None:
+            elif steer_rad is not None and self.v3_int_t is not None and abs(steer_rad) < float(v3['int_gate_v3']):
+                # 조향이 작을 때(직선)만 쌓음: 커브 동안 쌓인 값이 커브가 끝난 뒤에도 남아 안쪽 실선에 붙음(10/19 회피 7차)
                 dt = min(0.2, now_i - self.v3_int_t)
                 lim = float(v3['int_max_v3'])
                 self.v3_int = float(np.clip(self.v3_int + ki * (last_metrics['x_value'] - gx) * dt, -lim, lim))

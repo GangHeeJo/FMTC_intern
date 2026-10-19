@@ -188,6 +188,41 @@ def line_features(image, s_max=30, open_k=7, roi_top=40, roi_bot=320, y_eval=300
     return out
 
 
+def crosswalk_detect(image, roi_top=60, roi_bot=420, th_rel=0.5, th_min=25, line_w=250, line_k=0.25, line_thick=30,
+                     z_min_area=250, z_min_h=20, z_need=3, z_gap=170):
+    """상단 카메라 화면(640x480)에서 횡단보도 정지선 찾기(10/19). 반환: (정지선 y(x=320 높이) 또는 None, 줄무늬 수).
+    정지선 = 폭 line_w px 넘는 거의 가로(기울기 dy/dx ≤ line_k)의 얇은 흰 띠(면적/폭 ≤ line_thick) 중 차에 가장 가까운 것.
+    그 위(먼 쪽) z_gap px 안에 굵은 세로 줄무늬가 z_need개 이상 있어야 횡단보도로 봄(사다리 모양 상자·차선은 안 걸림).
+    조명 차이를 없애려 밝기(L)에 top-hat(61x61)을 씌우고, ROI 상위 0.5% 밝기의 th_rel배(최소 th_min)를 흰색으로.
+    bag_cw_191703(정지선 접근) y 147 → 327, 주행 녹화 bag_run_1725·1734·bag_obs_190819 1000장에서 잘못 인식 0"""
+    L = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)[..., 1]
+    th = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (61, 61)))
+    t = max(th_min, th_rel * float(np.percentile(th[roi_top:roi_bot], 99.5)))
+    mask = (th > t).astype(np.uint8) * 255
+    mask[:roi_top] = 0
+    mask[roi_bot:] = 0
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
+    lines, stripes = [], []
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if a < 150:
+            continue
+        if w >= line_w and a / w <= line_thick:
+            ys, xs = np.nonzero(lab == i)
+            k, b = np.polyfit(xs, ys, 1)
+            if abs(k) <= line_k:
+                lines.append(float(k * 320 + b))
+                continue
+        if a >= z_min_area and h >= z_min_h and h >= 0.8 * w and w <= 90:
+            stripes.append(y + h)
+    if not lines:
+        return None, 0
+    ly = max(lines)
+    nz = sum(1 for yb in stripes if ly - z_gap <= yb <= ly - 5)
+    return (ly if nz >= z_need else None), nz
+
+
 # 방식 3 선 추적 상태: 쪽별 마지막 선 (y_eval 위치 x, 기울기 k, 몇 프레임 전에 봤는지)
 _v3_track = {}
 
@@ -633,6 +668,8 @@ class LaneMaskingNode(Node):
         self.line_len_pub = self.create_publisher(Float32, '/lane_line_len', 10)
         # 반전 안 한 원본 화면의 흰 선 후보 [x(y=300), 기울기 dx/dy, 길이]×n. obs_evade vision 차선 변경용(10/19)
         self.lines_pub = self.create_publisher(Float32MultiArray, '/lane_lines', 10)
+        # 횡단보도 정지선 y(640x480 화면, x=320 높이). 없으면 -1. decision_auto가 신호등 정지 위치로 씀(10/19)
+        self.stop_line_pub = self.create_publisher(Float32, '/stop_line_y', 10)
         
         self.lane_change_flag = 0
         self.last_steer_rad = 0.0  # 이전 조향값 저장용 변수 추가
@@ -667,6 +704,8 @@ class LaneMaskingNode(Node):
             image = cv2.resize(image, (640, 480), interpolation=cv2.INTER_LINEAR)
         if self.lane_changing:
             self.lines_pub.publish(Float32MultiArray(data=line_features(image, self.s_max)))
+        sl_y, _ = crosswalk_detect(image)
+        self.stop_line_pub.publish(Float32(data=-1.0 if sl_y is None else sl_y))
 
         # 반전 중(1→2 변경)에는 뒤집힌 영상이 2→1 변경과 같아 보이므로 1차선 쪽 조건(2→1 변경 값)을 씀
         in_lane1 = self.lane_change_flag is True or self.lane_mirror

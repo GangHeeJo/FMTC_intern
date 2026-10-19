@@ -134,3 +134,12 @@ obs_evade:
     cam_found_frames: 2
     cam_cross_s_l1: 0.0       # 10/17: 1.5
     straighten_max_s_l1: 0.0  # 10/17: 5.0. 0 = 정면 복귀 없이 바로 넘김
+
+decision_auto:
+  ros__parameters:
+    # 10/19 사용자: 빨간·노란불이면 횡단보도 정지선 앞에서 섬. 정지선은 상단 카메라(lane_trace /stop_line_y),
+    # 신호등은 앞 카메라 sign_detect(/light_stop)만. 앞 카메라 YOLO 횡단보도(/cross_stop)는 안 씀
+    require_signals: true
+    stop_line_mode: true
+    stop_line_y: 320.0        # 사용자가 세운 정지 위치에서 정지선 y 326~330(bag_cw_191703). 미는 거리 보고 조정
+    cw_pass_s: 5.0

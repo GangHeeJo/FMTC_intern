@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 from geometry_msgs.msg import Twist
 
 class MotionDecision(Node):
@@ -17,6 +17,25 @@ class MotionDecision(Node):
         self.lane_timeout = float(self.get_parameter('lane_timeout_s').value)
         self.signal_timeout = float(self.get_parameter('signal_timeout_s').value)
         self.require_signals = bool(self.get_parameter('require_signals').value)
+        # 정지선 모드(10/19): 신호등(빨간·노란불)으로는 상단 카메라의 횡단보도 정지선(/stop_line_y, lane_trace)이
+        # 화면 y ≥ stop_line_y에 왔을 때만 멈추고, 초록불이 되면 출발한 뒤 cw_pass_s 동안은 정지선을 안 봄.
+        # 앞 카메라 YOLO의 횡단보도(/cross_stop)는 안 씀. 정지선에서 신호 입력이 끊겨 있으면 멈춤
+        self.declare_parameter('stop_line_mode', False)
+        self.declare_parameter('stop_line_y', 320.0)        # 640x480 화면. 10/19 사용자가 세운 정지 위치에서 326~330
+        self.declare_parameter('stop_line_timeout_s', 0.5)
+        self.declare_parameter('stop_line_lost_s', 2.0)     # 정지선에서 이만큼 정지선을 못 보면 대기 상태로 되돌림
+        self.declare_parameter('cw_pass_s', 5.0)
+        gp = lambda n: self.get_parameter(n).value
+        self.stop_line_mode = bool(gp('stop_line_mode'))
+        self.stop_line_th = float(gp('stop_line_y'))
+        self.stop_line_timeout = float(gp('stop_line_timeout_s'))
+        self.stop_line_lost = float(gp('stop_line_lost_s'))
+        self.cw_pass = float(gp('cw_pass_s'))
+        self.stop_line_y = -1.0
+        self.last_stop_line_time = None
+        self.last_line_seen = 0.0
+        self.cw_state = 'wait'      # wait: 정지선 기다림, at_line: 정지선(신호 봄), passing: 초록불에 출발해 지나는 중
+        self.cw_pass_start = 0.0
         self.last_lane_time = None
         self.last_light_time = None
         self.last_cross_time = None
@@ -34,6 +53,7 @@ class MotionDecision(Node):
         self.sub_lane = self.create_subscription(Twist, '/cmd_lane', self.lane_cb, 10)
         self.sub_light = self.create_subscription(Bool, '/light_stop', self.light_cb, 10)
         self.sub_cross = self.create_subscription(Bool, '/cross_stop', self.cross_cb, 10)
+        self.sub_stop_line = self.create_subscription(Float32, '/stop_line_y', self.stop_line_cb, 10)
         
         # 추가: 장애물 회피 명령 구독 (최우선순위)
         self.sub_obs = self.create_subscription(Twist, '/cmd_obs', self.obs_cb, 10)
@@ -56,6 +76,36 @@ class MotionDecision(Node):
         self.stop_by_crosswalk = msg.data
         self.last_cross_time = self.get_clock().now().nanoseconds / 1e9
 
+    def stop_line_cb(self, msg):
+        self.stop_line_y = float(msg.data)
+        self.last_stop_line_time = self.get_clock().now().nanoseconds / 1e9
+
+    def update_crosswalk(self, now, fresh):
+        """정지선 모드 상태 갱신. 지금 정지선에서 서야 하면 True"""
+        line_now = fresh(self.last_stop_line_time, self.stop_line_timeout) and self.stop_line_y >= 0.0
+        if line_now:
+            self.last_line_seen = now
+        if self.cw_state == 'wait' and line_now and self.stop_line_y >= self.stop_line_th:
+            self.cw_state = 'at_line'
+            self.get_logger().warn(f'Stop line reached (y {self.stop_line_y:.0f})')
+        if self.cw_state == 'at_line':
+            if now - self.last_line_seen > self.stop_line_lost:
+                self.cw_state = 'wait'
+                self.get_logger().warn('Stop line lost -> waiting for stop line')
+            elif not fresh(self.last_light_time, self.signal_timeout):
+                self.get_logger().warn('At stop line, no traffic light input - STOPPING', throttle_duration_sec=1.0)
+                return True
+            elif self.stop_by_light:
+                self.get_logger().info('At stop line, red/yellow light - STOPPING', throttle_duration_sec=1.0)
+                return True
+            else:
+                self.cw_state = 'passing'
+                self.cw_pass_start = now
+                self.get_logger().warn('At stop line, light not red -> GO')
+        if self.cw_state == 'passing' and now - self.cw_pass_start > self.cw_pass:
+            self.cw_state = 'wait'
+        return False
+
     # 추가: 장애물 회피 콜백
     def obs_cb(self, msg):
         self.current_obs_cmd = msg
@@ -71,7 +121,8 @@ class MotionDecision(Node):
         # [안전장치] 차선/신호 입력이 끊기거나 오래됐으면, 다른 판단 하지 말고 바로 정지
         # (require_signals=false면 신호등 카메라 없이 차선만으로도 테스트 가능)
         inputs_ready = fresh(self.last_lane_time, self.lane_timeout)
-        if self.require_signals:
+        # 정지선 모드에서는 신호 끊김을 정지선에서만 봄(sign_detect가 1~3초씩 멈춰도 정지선 밖에서는 계속 달림, 10/17)
+        if self.require_signals and not self.stop_line_mode:
             inputs_ready = (
                 inputs_ready
                 and fresh(self.last_light_time, self.signal_timeout)
@@ -89,8 +140,9 @@ class MotionDecision(Node):
             msg = self.current_obs_cmd
             self.get_logger().info('PRIORITY: OBSTACLE EVASION ACTIVE')
         
-        # [우선순위 2] 정지 조건 확인 (신호등 OR 횡단보도)
-        elif self.stop_by_light or self.stop_by_crosswalk:
+        # [우선순위 2] 정지 조건 확인 (신호등 OR 횡단보도). 정지선 모드면 정지선에서 빨간·노란불일 때만
+        elif (self.update_crosswalk(current_time, fresh) if self.stop_line_mode
+              else (self.stop_by_light or self.stop_by_crosswalk)):
             msg.angular.z = self.current_lane_cmd.angular.z
             msg.linear.x = 0.0
             self.get_logger().info('STOP SIGNAL ACTIVE')

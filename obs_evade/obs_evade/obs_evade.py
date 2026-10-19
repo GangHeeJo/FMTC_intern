@@ -71,6 +71,10 @@ class ObstacleEvasionNode(Node):
         self.declare_parameter('start_len_px', 450.0)
         self.declare_parameter('start_frames', 15)
         self.declare_parameter('cam_turn_max_s_l2', -1.0)
+        # cam_turn_max_s 뒤에 반대로 되꺾는 시간(초, 목표 차선별). 0이면 바로 직진. 2024 보고서처럼 좌→우로 방향을 되돌려
+        # 새 차선 안쪽으로 파고들지 않게(10/19 회피 6차: 2초 꺾고 직진하자 1차선 실선 쪽으로 170px까지 들어감)
+        self.declare_parameter('cam_back_s_l1', 0.0)
+        self.declare_parameter('cam_back_s_l2', 0.0)
         # True면 1→2 변경을 2→1과 똑같은 절차로 하되 영상(lane_trace)과 조향 방향만 좌우 반전(원본 cam_lane_auto 방식).
         # 1→2 전용 값(*_l2 시간·기울기)은 안 쓰고 2→1 값(*_l1)을 그대로 씀. False면 10/17 방식(1→2를 따로 맞춘 값)(10/19)
         self.declare_parameter('mirror_to_lane2', True)
@@ -114,6 +118,7 @@ class ObstacleEvasionNode(Node):
         self.STRAIGHTEN_MAX_BY = {LANE1: smax(gp('straighten_max_s_l1')), LANE2: smax(gp('straighten_max_s_l2'))}
         self.CAM_CROSS_S = {LANE1: float(gp('cam_cross_s_l1')), LANE2: float(gp('cam_cross_s_l2'))}
         self.CAM_TURN_MAX = {LANE1: float(gp('cam_turn_max_s_l1')), LANE2: float(gp('cam_turn_max_s_l2'))}
+        self.CAM_BACK = {LANE1: float(gp('cam_back_s_l1')), LANE2: float(gp('cam_back_s_l2'))}
         self.ROI_NEAR, self.ROI_FAR = float(gp('roi_near')), float(gp('roi_far'))
         self.ROI_HALF_W = float(gp('roi_half_width'))
         self.MIN_POINTS, self.MIN_SCANS = int(gp('min_points')), int(gp('min_scans'))
@@ -353,7 +358,10 @@ class ObstacleEvasionNode(Node):
             twist_msg = Twist()
             twist_msg.linear.x = self.MAX_SPEED * self.CHANGE_SPEED
             turn_max = self.CAM_TURN_MAX[pk]
-            if 0.0 <= turn_max <= elapsed:
+            back = self.CHANGE_STEER[1] if len(self.CHANGE_STEER) > 1 else -self.CHANGE_STEER[0]
+            if 0.0 <= turn_max <= elapsed < turn_max + self.CAM_BACK[pk]:
+                twist_msg.angular.z = self.MAX_STEER * sign * back  # 반대로 되꺾어 방향을 되돌림
+            elif 0.0 <= turn_max <= elapsed:
                 twist_msg.angular.z = 0.0  # 정해진 각도까지 돌았으면 직진하며 새 선을 찾음
             else:
                 twist_msg.angular.z = self.MAX_STEER * sign * self.CHANGE_STEER[0]

@@ -171,7 +171,8 @@ _v3_track = {}
 def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
                    y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
                    k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=80.0, max_jump_cold=200.0, join_px=40.0, join_k=0.3,
-                   track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0, fit_top=None, y_look=None):
+                   track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0, fit_top=None, y_look=None,
+                   chain_px=40.0, chain_gap=150.0, chain_k=1.2, curve_span=150.0, y_look_curve=None):
     """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
     흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
@@ -192,7 +193,10 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
     y_look을 주면 소실점 대신 화면 안 앞쪽 높이(y_look)의 차로 중앙으로 방향을 봄(10/19 커브 시험: 휜 실선을 직선으로 맞춰
     화면 위 밖 소실점까지 늘리면 커브 앞에서 218px 왼쪽으로 과장돼 출발하자마자 최대로 꺾고 점선을 넘음).
     조향 = b × (y_eval 중앙 − guide_x) + a × (y_look 중앙 − 기준 중앙선의 y_look 위치).
-    fit_top을 주면 그보다 아래(가까운) 점만으로 선을 맞춤 — 먼 곳의 휨이 섞이지 않게."""
+    fit_top을 주면 그보다 아래(가까운) 점만으로 선을 맞춤 — 먼 곳의 휨이 섞이지 않게.
+    커브: 고른 선 위쪽으로 이어지는 토막을 차례로 잇고(마지막 토막 방향으로 늘린 위치에서 chain_px 안, 세로 간격
+    chain_gap 안, 기울기 차 chain_k 안), 이은 선이 세로 curve_span px 넘게 걸치면 2차식으로 맞춰 y_look 중앙을 계산.
+    (10/19 회피 6차: 1차선 왼쪽 커브에서 가까운 점선 토막 하나만 직선으로 맞춰 휘는 정도를 몰라 왼쪽 4~10°뿐)"""
     overlay = image.copy()
     # 흰 선 밝기 기준을 화면에 맞춰 정함: 바닥(중앙값) + l_rel × (상위 1% − 바닥). usb_cam 영상은 밝기 50으로 설정돼
     # 어둡고(바닥 14, 선 121~130) 조명에 따라 크게 바뀌어 고정 l_min으로는 놓침(10/19). 선이 없을 때 너무 내려가지 않게 l_floor.
@@ -222,8 +226,10 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         d = dt[ys, xs]
         if 2.0 * float(np.median(d[d >= np.percentile(d, 80)])) > max_thick:
             continue
-        cands['L' if k < 0 else 'R'].append(dict(xs=xs, ys=ys, k=float(k), x=float(k * y_eval + b)))
+        cands['L' if k < 0 else 'R'].append(dict(xs=xs, ys=ys, k=float(k), x=float(k * y_eval + b),
+                                                  ym=float(np.mean(ys)), xm=float(np.mean(xs))))
     fits = {}
+    quads = {}
     for s, sign, col in (('L', -1, (255, 0, 0)), ('R', 1, (0, 0, 255))):
         if s not in sides and not (sides == 'R+' and s == 'L'):
             continue
@@ -231,20 +237,55 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         tracked = tr is not None and tr[2] < track_frames
         expect = tr[0] if tracked else guide_x + sign * lane_width / 2.0
         if tr is not None:
-            _v3_track[s] = (tr[0], tr[1], tr[2] + 1)
-        near = [c for c in cands[s] if abs(c['x'] - expect) < (max_jump if tracked else max_jump_cold)]
+            _v3_track[s] = (tr[0], tr[1], tr[2] + 1) + tuple(tr[3:])
+        if tracked and len(tr) > 3:
+            # 추적 중: 후보가 실제로 있는 높이에서 직전 선(늘린 선)과의 거리로 비교. 위쪽일수록 커브로 더 벗어나므로 넓게 허용
+            # (10/19 회피 6차: 커브에서 가까운 점선 토막이 지나간 뒤 위쪽 토막을 y=300까지 곧게 늘려 비교해 버리고 선을 놓침)
+            dist = lambda c: abs(c['xm'] - (tr[1] * c['ym'] + tr[3]))
+            near = [c for c in cands[s] if dist(c) < max_jump + 0.5 * max(0.0, y_eval - c['ym'])]
+        else:
+            dist = lambda c: abs(c['x'] - expect)
+            near = [c for c in cands[s] if dist(c) < (max_jump if tracked else max_jump_cold)]
         for c in cands[s]:
             overlay[c['ys'], c['xs']] = (128, 128, 128)
         if not near:
             continue
-        seed = min(near, key=lambda c: abs(c['x'] - expect))
+        seed = min(near, key=dist)
         group = [c for c in cands[s] if abs(c['x'] - seed['x']) < join_px and abs(c['k'] - seed['k']) < join_k]
+        # 위쪽으로 이어지는 토막 잇기(커브)
+        chain = list(group)
+        while True:
+            top = min(chain, key=lambda c: c['ys'].min())
+            ty = float(top['ys'].min()); tb = float(np.mean(top['xs'] - top['k'] * top['ys']))
+            nxt = None
+            for c in cands[s]:
+                if any(c is g for g in chain):
+                    continue
+                by = float(c['ys'].max())
+                if not (ty - chain_gap < by < ty + 10) or abs(c['k'] - top['k']) > chain_k:
+                    continue
+                bx = float(np.mean(c['xs'][c['ys'] >= by - 3]))
+                d = abs(bx - (top['k'] * by + tb))
+                # 커브에서는 곧게 늘린 위치에서 멀어질수록 더 벗어나므로 세로 간격에 비례해 허용
+                if d < chain_px + 0.5 * max(0.0, ty - by) and (nxt is None or d < nxt[0]):
+                    nxt = (d, c)
+            if nxt is None:
+                break
+            chain.append(nxt[1])
+        cx_all = np.concatenate([c['xs'] for c in chain]); cy_all = np.concatenate([c['ys'] for c in chain])
+        last_metrics['chain_' + s] = (len(group), len(chain), int(np.ptp(cy_all)))
+        if y_look is not None and np.ptp(cy_all) >= curve_span:
+            quads[s] = np.polyfit(cy_all, cx_all, 2)
+            overlay[cy_all, cx_all] = (0, 165, 255)
+            qy = np.arange(int(cy_all.min()), int(cy_all.max()), 4)
+            cv2.polylines(overlay, [np.column_stack([np.polyval(quads[s], qy), qy]).astype(np.int32).reshape(-1, 1, 2)],
+                          False, (255, 0, 255), 2)
         xs = np.concatenate([c['xs'] for c in group]); ys = np.concatenate([c['ys'] for c in group])
         if fit_top is not None and np.sum(ys >= fit_top) >= 20:
             xs, ys = xs[ys >= fit_top], ys[ys >= fit_top]
         k, b = np.polyfit(ys, xs, 1)
         fits[s] = (float(k), float(b))
-        _v3_track[s] = (float(k * y_eval + b), float(k), 0)
+        _v3_track[s] = (float(k * y_eval + b), float(k), 0, float(b))
         overlay[ys, xs] = col
         cv2.line(overlay, (int(b + k * roi_top), roi_top), (int(b + k * roi_bot), roi_bot), (0, 255, 255), 2)
     cv2.line(overlay, (0, roi_bot), (image.shape[1], roi_bot), (0, 255, 0), 1)
@@ -280,13 +321,17 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_vp - guide_vp)
     else:
         # y_look 높이의 차로 중앙: 양쪽이면 평균, 한쪽이면 원근에 맞춘 반폭(소실점에서 0, y_eval에서 lane_width/2)만큼 안쪽
+        # 곡선으로 맞춘 쪽만 쓰면 더 먼 높이(y_look_curve)를 봄: y=200에서는 커브가 덜 휘어 보여 조향이 작음
+        use_q = ('R' in fits and 'R' in quads and 'L' not in fits) or ('L' in fits and 'L' in quads and 'R' not in fits)
+        if use_q and y_look_curve is not None:
+            y_look = y_look_curve
         half = lane_width / 2.0 * (y_look - vp_y) / (y_eval - vp_y)
         if 'L' in fits and 'R' in fits:
             x_look = (at(fits['L'], y_look) + at(fits['R'], y_look)) / 2.0
         elif 'L' in fits:
-            x_look = at(fits['L'], y_look) + half
+            x_look = (np.polyval(quads['L'], y_look) if 'L' in quads else at(fits['L'], y_look)) + half
         else:
-            x_look = at(fits['R'], y_look) - half
+            x_look = (np.polyval(quads['R'], y_look) if 'R' in quads else at(fits['R'], y_look)) - half
         # 기준 중앙선: (guide_x, y_eval)과 (guide_vp, vp_y)를 잇는 선
         x_look0 = guide_x + (guide_vp - guide_x) * (y_eval - y_look) / (y_eval - vp_y)
         last_metrics['x_look'] = float(x_look)
@@ -526,12 +571,13 @@ class LaneMaskingNode(Node):
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
                      ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
                      ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12),
-                     ('track_frames_v3', 15)):
+                     ('track_frames_v3', 15), ('y_look_curve_v3', -1)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
-                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3', 'track_frames_v3')}
+                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3', 'track_frames_v3',
+                   'y_look_curve_v3')}
         # 방식 3 적분 보정: 차가 한쪽으로 끌려(10/19: 2차선·1차선 모두 계속 오른쪽 보정이 필요) 목표보다 실선 쪽에서
         # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
         self.v3_int = 0.0
@@ -642,7 +688,8 @@ class LaneMaskingNode(Node):
                 sides=sides_eff, k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']),
                 fit_top=int(v3['fit_top_v3']) if int(v3['fit_top_v3']) >= 0 else None,
                 y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None,
-                track_frames=int(v3['track_frames_v3']))
+                track_frames=int(v3['track_frames_v3']),
+                y_look_curve=int(v3['y_look_curve_v3']) if int(v3['y_look_curve_v3']) >= 0 else None)
             now_i = time.time()
             ki = float(v3['ki_v3'])
             if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:

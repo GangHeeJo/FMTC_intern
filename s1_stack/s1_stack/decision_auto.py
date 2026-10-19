@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, UInt8
 from geometry_msgs.msg import Twist
 from collections import deque
 
@@ -24,7 +24,7 @@ class MotionDecision(Node):
         self.declare_parameter('stop_line_mode', False)
         self.declare_parameter('stop_line_y', 320.0)        # 640x480 화면. 10/19 사용자가 세운 정지 위치에서 326~330
         self.declare_parameter('stop_line_timeout_s', 0.5)
-        self.declare_parameter('stop_line_far_y', 200.0)    # 정지선 상태에서 정지선이 이보다 위(멀리)에 보이면 대기로 되돌림
+        self.declare_parameter('manual_mode', 0)           # /drive_mode 값 중 수동(B). 정지선 상태를 풂
         self.declare_parameter('cw_line_recent_s', 1.0)    # 정지선을 이 시간 안에 봤으면 횡단보도 구간(/crosswalk_active)
         # 정지선에서 출발: 초록불(sign_detect /light_green)이 이 시간 동안 계속 보이고 빨간·노란불이 아닐 때만.
         # 10/19 bag_full_195517: 서는 순간 흔들려 빨간불 확신도가 0.37까지 떨어져 light_stop이 0.3초 끊기자 빨간불에 출발함
@@ -37,7 +37,8 @@ class MotionDecision(Node):
         self.stop_line_mode = bool(gp('stop_line_mode'))
         self.stop_line_th = float(gp('stop_line_y'))
         self.stop_line_timeout = float(gp('stop_line_timeout_s'))
-        self.stop_line_far = float(gp('stop_line_far_y'))
+        self.manual_mode = int(gp('manual_mode'))
+        self.drive_mode = None
         self.cw_line_recent = float(gp('cw_line_recent_s'))
         self.go_green = float(gp('go_green_s'))
         self.green = False
@@ -70,6 +71,7 @@ class MotionDecision(Node):
         self.sub_cross = self.create_subscription(Bool, '/cross_stop', self.cross_cb, 10)
         self.sub_stop_line = self.create_subscription(Float32, '/stop_line_y', self.stop_line_cb, 10)
         self.sub_green = self.create_subscription(Bool, '/light_green', self.green_cb, 10)
+        self.sub_mode = self.create_subscription(UInt8, '/drive_mode', self.mode_cb, 10)
         
         # 추가: 장애물 회피 명령 구독 (최우선순위)
         self.sub_obs = self.create_subscription(Twist, '/cmd_obs', self.obs_cb, 10)
@@ -93,6 +95,9 @@ class MotionDecision(Node):
     def cross_cb(self, msg):
         self.stop_by_crosswalk = msg.data
         self.last_cross_time = self.get_clock().now().nanoseconds / 1e9
+
+    def mode_cb(self, msg):
+        self.drive_mode = int(msg.data)
 
     def green_cb(self, msg):
         now = self.get_clock().now().nanoseconds / 1e9
@@ -122,11 +127,12 @@ class MotionDecision(Node):
             self.last_line_seen = now
             self.get_logger().warn(f'Stop line went under the view (last y {self.line_hist[-1][1]:.0f}) -> reached')
         if self.cw_state == 'at_line':
-            # 정지선이 보닛 아래로 들어가 안 보여도 계속 정지선 상태(서 있는 동안 못 봄, 10/19). 먼 곳(y < stop_line_far_y)에
-            # 정지선이 다시 보이면(차를 뒤로 옮김) 대기 상태로 되돌림
-            if line_now and self.stop_line_y < self.stop_line_far:
+            # 정지선이 보닛 아래로 들어가 안 보여도 계속 정지선 상태(서 있는 동안 못 봄, 10/19). 풀리는 건 초록불이나
+            # 수동 모드(차를 손으로 옮김)뿐. 예전에는 먼 곳에 정지선이 다시 보이면 풀었는데, 서 있는 동안 줄무늬 사이 가로선을
+            # y 194로 잘못 보고 풀려 빨간불에 출발함(bag_full_201527 118.9초)
+            if self.drive_mode == self.manual_mode:
                 self.cw_state = 'wait'
-                self.get_logger().warn(f'Stop line far again (y {self.stop_line_y:.0f}) -> waiting for stop line')
+                self.get_logger().warn('Manual mode at stop line -> waiting for stop line')
             elif not fresh(self.last_light_time, self.signal_timeout):
                 self.get_logger().warn('At stop line, no traffic light input - STOPPING', throttle_duration_sec=1.0)
                 return True

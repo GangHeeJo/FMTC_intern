@@ -187,6 +187,8 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
     sides='R'이면 오른쪽 선(2차선 실선)만 따라감(10/19 사용자 결정: 점선 쪽에서 옆 차로 선·트랙 밖 흰 차를 잡는 문제).
     1차선은 lane_trace가 영상을 좌우 반전해 왼쪽 실선이 오른쪽에 오게 해서 같은 값으로 따라감.
     굵기(max_thick, px)보다 두꺼운 덩어리(흰 차 차체 등)는 선이 아님.
+    sides='R+'면 오른쪽(실선)을 우선 따라가고, 실선이 안 보일 때만 왼쪽(점선) 위치 + 차로 폭/2로 중앙을 잡음(10/19 회피 5차:
+    1차선 왼쪽 커브에서 안쪽 실선이 화면 밖으로 빠져 선을 놓치고 오른쪽 조향을 유지함).
     y_look을 주면 소실점 대신 화면 안 앞쪽 높이(y_look)의 차로 중앙으로 방향을 봄(10/19 커브 시험: 휜 실선을 직선으로 맞춰
     화면 위 밖 소실점까지 늘리면 커브 앞에서 218px 왼쪽으로 과장돼 출발하자마자 최대로 꺾고 점선을 넘음).
     조향 = b × (y_eval 중앙 − guide_x) + a × (y_look 중앙 − 기준 중앙선의 y_look 위치).
@@ -223,7 +225,7 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         cands['L' if k < 0 else 'R'].append(dict(xs=xs, ys=ys, k=float(k), x=float(k * y_eval + b)))
     fits = {}
     for s, sign, col in (('L', -1, (255, 0, 0)), ('R', 1, (0, 0, 255))):
-        if s not in sides:
+        if s not in sides and not (sides == 'R+' and s == 'L'):
             continue
         tr = _v3_track.get(s)
         tracked = tr is not None and tr[2] < track_frames
@@ -246,6 +248,8 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         overlay[ys, xs] = col
         cv2.line(overlay, (int(b + k * roi_top), roi_top), (int(b + k * roi_bot), roi_bot), (0, 255, 255), 2)
     cv2.line(overlay, (0, roi_bot), (image.shape[1], roi_bot), (0, 255, 0), 1)
+    if sides == 'R+' and 'R' in fits and 'L' in fits:
+        del fits['L']  # 실선이 보이면 실선만 씀(점선 쪽은 추적만 이어감)
     if not fits:
         last_metrics.clear()
         last_metrics['l_min'] = l_min
@@ -521,12 +525,13 @@ class LaneMaskingNode(Node):
                      ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
                      ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
-                     ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12)):
+                     ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12),
+                     ('track_frames_v3', 15)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
-                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3')}
+                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3', 'track_frames_v3')}
         # 방식 3 적분 보정: 차가 한쪽으로 끌려(10/19: 2차선·1차선 모두 계속 오른쪽 보정이 필요) 목표보다 실선 쪽에서
         # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
         self.v3_int = 0.0
@@ -634,7 +639,8 @@ class LaneMaskingNode(Node):
                 l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']), steer_max=float(v3['steer_max_v3']),
                 sides=str(v3['sides_v3']), k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']),
                 fit_top=int(v3['fit_top_v3']) if int(v3['fit_top_v3']) >= 0 else None,
-                y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None)
+                y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None,
+                track_frames=int(v3['track_frames_v3']))
             now_i = time.time()
             ki = float(v3['ki_v3'])
             if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:

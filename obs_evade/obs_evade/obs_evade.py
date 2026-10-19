@@ -255,7 +255,9 @@ class ObstacleEvasionNode(Node):
         # 전방 장애물: 2차선이든 1차선이든 감지되면 반대 차선으로 (두 모드 공통)
         # 차선 변경 직후 rearm_delay_s 동안은 쉼(방금 피한 장애물이 옆 차선 앞쪽에 보여 재감지되는 것 방지)
         self.blocked = False
-        if self.drive_mode is not None and self.drive_mode != 1:
+        # 모드를 모르면(cmd_mux는 바뀔 때만 알림) 감지 안 함: obs_run을 켠 뒤 A를 누르면 그때 알게 됨(10/19: 모드 모른 채
+        # 차를 옮기는 동안 회피로 넘어감)
+        if self.drive_mode != 1:
             self.obstacle_count = 0
         elif self.state in (LANE2, LANE1) and time.time() - self.state_start >= self.REARM_DELAY:
             roi_idx = (ahead > self.ROI_NEAR) & (ahead < self.ROI_FAR) & (np.abs(right) < self.ROI_HALF_W)

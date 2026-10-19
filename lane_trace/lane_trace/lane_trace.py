@@ -8,7 +8,7 @@ import numpy as np
 import time
 import cv2
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32, UInt8
+from std_msgs.msg import Bool, Float32, UInt8, Float32MultiArray
 from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 
@@ -162,6 +162,30 @@ def lane_detect_v2(image, guide_x, guide_slope, a_rad, b_rad, min_slope, roi_top
     last_metrics.update({'slope_avg': slope_avg, 'x_value': x_value, 'n_parts': len(group)})
     steering_rad = a_rad * (slope_avg - guide_slope) + b_rad * (x_value - guide_x)
     return overlay, mask, float(np.clip(steering_rad, -0.4, 0.4))
+
+
+def line_features(image, s_max=30, open_k=7, roi_top=40, roi_bot=320, y_eval=300, l_rel=0.6, l_floor=60, min_area=120):
+    """화면(반전 안 한 원본, 640x480)의 흰 선 후보 목록: [x(y_eval 높이), 기울기 dx/dy, 길이(px)] 의 평평한 리스트.
+    obs_evade vision 차선 변경이 '점선·실선이 화면 어디에 어떤 기울기로 보이는지'로 단계를 넘기는 데 씀(10/19).
+    흰 선 기준은 방식 3과 같음(바닥 + l_rel × (상위 1% − 바닥))"""
+    L = cv2.cvtColor(image[roi_top:roi_bot], cv2.COLOR_BGR2HLS)[..., 1]
+    med, top = np.median(L), np.percentile(L, 99)
+    mask = remove_thin(color_filter(image, int(max(l_floor, med + l_rel * (top - med))), s_max), open_k)
+    mask[:roi_top, :] = 0
+    mask[roi_bot:, :] = 0
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
+    out = []
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] < min_area:
+            continue
+        ys, xs = np.nonzero(lab == i)
+        if np.ptp(ys) < 10:
+            continue
+        k, b = np.polyfit(ys, xs, 1)
+        if abs(k) > 3.0:
+            continue
+        out += [float(k * y_eval + b), float(k), float(np.ptp(ys) * np.sqrt(1.0 + k * k))]
+    return out
 
 
 # 방식 3 선 추적 상태: 쪽별 마지막 선 (y_eval 위치 x, 기울기 k, 몇 프레임 전에 봤는지)
@@ -607,6 +631,8 @@ class LaneMaskingNode(Node):
         self.slope_pub = self.create_publisher(Float32, '/lane_slope', 10)
         # 가장 긴 선의 길이(px). obs_evade가 출발 차선 자동 판단에 씀(실선 = 길다 → 2차선, 점선 = 짧다 → 1차선)
         self.line_len_pub = self.create_publisher(Float32, '/lane_line_len', 10)
+        # 반전 안 한 원본 화면의 흰 선 후보 [x(y=300), 기울기 dx/dy, 길이]×n. obs_evade vision 차선 변경용(10/19)
+        self.lines_pub = self.create_publisher(Float32MultiArray, '/lane_lines', 10)
         
         self.lane_change_flag = 0
         self.last_steer_rad = 0.0  # 이전 조향값 저장용 변수 추가
@@ -639,6 +665,8 @@ class LaneMaskingNode(Node):
         # 카메라를 320x240으로 받을 수 있게 하고, 여기서 640x480으로 늘려 기존 로직을 그대로 쓴다.
         if image.shape[1] != 640 or image.shape[0] != 480:
             image = cv2.resize(image, (640, 480), interpolation=cv2.INTER_LINEAR)
+        if self.lane_changing:
+            self.lines_pub.publish(Float32MultiArray(data=line_features(image, self.s_max)))
 
         # 반전 중(1→2 변경)에는 뒤집힌 영상이 2→1 변경과 같아 보이므로 1차선 쪽 조건(2→1 변경 값)을 씀
         in_lane1 = self.lane_change_flag is True or self.lane_mirror

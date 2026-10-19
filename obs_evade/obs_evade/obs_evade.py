@@ -28,6 +28,8 @@ class ObstacleEvasionNode(Node):
         # 차선 변경: 단계별 조향 비율(+1 = 왼쪽 최대)과 시간(초). 왼쪽 변경은 [+a, -a], 오른쪽 변경은 부호 반대로 씀
         self.declare_parameter('change_steer', [1.0, -1.0])
         self.declare_parameter('change_time_s', [2.5, 2.5])
+        # timed 1→2 전용 시간. [-1.0]이면 change_time_s와 같게(10/19: 오른쪽으로 꺾을 때 덜 돌아 1→2가 덜 넘어감)
+        self.declare_parameter('change_time_s_to_lane2', [-1.0])
         self.declare_parameter('change_speed', 0.7)  # max_speed에 곱하는 비율
         # camera: change_steer[0]으로 꺾다가 원래 보던 선이 사라진 뒤 새 차선의 선이 cam_found_frames 연속 잡히면
         #         변경 완료 → lane_trace에 넘김(방향 보정은 lane_trace가 함). timed: change_steer/change_time_s 단계대로
@@ -124,6 +126,8 @@ class ObstacleEvasionNode(Node):
         self.MODE = str(gp('mode'))
         self.CHANGE_STEER = list(gp('change_steer'))
         self.CHANGE_TIME = list(gp('change_time_s'))
+        t2 = list(gp('change_time_s_to_lane2'))
+        self.CHANGE_TIME_BY = {TO_LANE1: self.CHANGE_TIME, TO_LANE2: self.CHANGE_TIME if t2 == [-1.0] else t2}
         self.CHANGE_SPEED = float(gp('change_speed'))
         self.CHANGE_MODE = str(gp('change_mode'))
         self.CAM_MIN_S, self.CAM_MAX_S = float(gp('cam_min_s')), float(gp('cam_max_s'))
@@ -161,8 +165,8 @@ class ObstacleEvasionNode(Node):
             raise ValueError("mode는 'return' 또는 'toggle'")
         if self.CHANGE_MODE not in ('camera', 'timed', 'vision'):
             raise ValueError("change_mode는 'camera', 'timed', 'vision'")
-        if len(self.CHANGE_STEER) != len(self.CHANGE_TIME):
-            raise ValueError('change_steer와 change_time_s의 길이가 같아야 함')
+        if any(len(self.CHANGE_STEER) != len(t) for t in self.CHANGE_TIME_BY.values()):
+            raise ValueError('change_steer와 change_time_s(_to_lane2)의 길이가 같아야 함')
 
         # 상태 제어 변수
         start_lane = int(gp('start_lane'))
@@ -212,7 +216,7 @@ class ObstacleEvasionNode(Node):
             f'(cam to L1 {self.CAM_MIN_BY[LANE1]}~{self.CAM_MAX_BY[LANE1]}s, '
             + (f'to L2 = mirrored L1) ' if self.MIRROR else f'to L2 {self.CAM_MIN_BY[LANE2]}~{self.CAM_MAX_BY[LANE2]}s) ')
             + f'change steer={self.CHANGE_STEER} '
-            f'time={self.CHANGE_TIME}s speed={self.CHANGE_SPEED} roi={self.ROI_NEAR}~{self.ROI_FAR}m')
+            f'time={self.CHANGE_TIME}s to L2 {self.CHANGE_TIME_BY[TO_LANE2]}s speed={self.CHANGE_SPEED} roi={self.ROI_NEAR}~{self.ROI_FAR}m')
 
     def set_state(self, state):
         self.state = state
@@ -450,8 +454,9 @@ class ObstacleEvasionNode(Node):
             self.cmd_obs_pub.publish(twist_msg)
             return
 
+        times = self.CHANGE_TIME_BY[self.state]
         step, t_end = None, 0.0
-        for i, dur in enumerate(self.CHANGE_TIME):
+        for i, dur in enumerate(times):
             t_end += dur
             if elapsed < t_end:
                 step = i
@@ -462,8 +467,8 @@ class ObstacleEvasionNode(Node):
             return
         if step != self.change_step:
             self.change_step = step
-            self.get_logger().info(f'{self.state} step {step + 1}/{len(self.CHANGE_TIME)}: '
-                                   f'steer {sign * self.CHANGE_STEER[step]:+.1f} for {self.CHANGE_TIME[step]}s')
+            self.get_logger().info(f'{self.state} step {step + 1}/{len(times)}: '
+                                   f'steer {sign * self.CHANGE_STEER[step]:+.1f} for {times[step]}s')
         twist_msg = Twist()
         # 조향 +1이 왼쪽 최대(+max_steer)
         twist_msg.linear.x = self.MAX_SPEED * self.CHANGE_SPEED

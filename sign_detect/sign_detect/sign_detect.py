@@ -40,6 +40,7 @@ class VisionPercept(Node):
         # 안정성 향상을 위한 윈도우 필터 (5프레임 저장)
         self.cw_history = deque(maxlen=5)
         self.tl_history = deque(maxlen=5)
+        self.green_history = deque(maxlen=5)
 
         # 설정값
         self.img_width = 640
@@ -55,6 +56,8 @@ class VisionPercept(Node):
         
         self.pub_cross = self.create_publisher(Bool, 'cross_stop', 10)
         self.pub_light = self.create_publisher(Bool, 'light_stop', 10)
+        # 초록불(10/19): decision_auto 정지선 모드는 빨간불이 잠깐 끊긴 것이 아니라 초록불을 봐야 출발
+        self.pub_green = self.create_publisher(Bool, 'light_green', 10)
 
         self.get_logger().info('Sign Detect Node has been started.')
 
@@ -73,6 +76,7 @@ class VisionPercept(Node):
         
         current_cw_detected = False
         current_tl_detected = False
+        current_green = False
 
         for box in results.boxes:
             cls = int(box.cls[0])
@@ -85,6 +89,11 @@ class VisionPercept(Node):
                 if self.bbox_center_bound[0] * self.img_width < center_x < self.bbox_center_bound[1] * self.img_width:
                     current_cw_detected = True
 
+            # 초록불 (Green: 1). 크기 조건은 빨간불과 같음
+            elif cls == 1 and conf > self.light_conf:
+                if (coords[2] - coords[0]) * (coords[3] - coords[1]) >= self.min_bbox_size:
+                    current_green = True
+
             # 2. 신호등 판단 (Red: 2, Yellow: 3)
             elif cls in [2, 3] and conf > self.light_conf:
                 size = (coords[2] - coords[0]) * (coords[3] - coords[1])
@@ -94,6 +103,7 @@ class VisionPercept(Node):
         # 히스토리 업데이트
         self.cw_history.append(current_cw_detected)
         self.tl_history.append(current_tl_detected)
+        self.green_history.append(current_green)
 
         # 최종 결정
         stop_cw = Bool()
@@ -104,6 +114,7 @@ class VisionPercept(Node):
 
         self.pub_cross.publish(stop_cw)
         self.pub_light.publish(stop_tl)
+        self.pub_green.publish(Bool(data=sum(self.green_history) >= 3))
 
 def main(args=None):
     rclpy.init(args=args)

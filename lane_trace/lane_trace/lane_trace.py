@@ -521,12 +521,16 @@ class LaneMaskingNode(Node):
                      ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
                      ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
-                     ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0)):
+                     ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
-                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1')}
+                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3')}
+        # 방식 3 적분 보정: 차가 한쪽으로 끌려(10/19: 2차선·1차선 모두 계속 오른쪽 보정이 필요) 목표보다 실선 쪽에서
+        # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
+        self.v3_int = 0.0
+        self.v3_int_t = None
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -584,6 +588,7 @@ class LaneMaskingNode(Node):
         if flip != getattr(self, '_last_flip', False):
             _v3_track.clear()  # 반전 전후로 선 위치가 좌우로 바뀌므로 추적 초기화
             self.steer_hist = []
+            self.v3_int = 0.0
         self._last_flip = flip
         if flip:
             image = cv2.flip(image, 1) # 이미지 반전
@@ -624,6 +629,18 @@ class LaneMaskingNode(Node):
                 sides=str(v3['sides_v3']), k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']),
                 fit_top=int(v3['fit_top_v3']) if int(v3['fit_top_v3']) >= 0 else None,
                 y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None)
+            now_i = time.time()
+            ki = float(v3['ki_v3'])
+            if self.lane_changing or ki <= 0.0:
+                self.v3_int = 0.0  # 차선 변경 중(obs_evade가 조향)에는 쌓지 않음
+            elif steer_rad is not None and self.v3_int_t is not None:
+                dt = min(0.2, now_i - self.v3_int_t)
+                lim = float(v3['int_max_v3'])
+                self.v3_int = float(np.clip(self.v3_int + ki * (last_metrics['x_value'] - gx) * dt, -lim, lim))
+            self.v3_int_t = now_i
+            if steer_rad is not None:
+                sm = float(v3['steer_max_v3'])
+                steer_rad = float(np.clip(steer_rad + self.v3_int, -sm, sm))
         else:
             result_img, mask_img, steer_rad = lane_detect(
                 image, guide_x, guide_slope,

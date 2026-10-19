@@ -724,7 +724,9 @@ class LaneMaskingNode(Node):
                 y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None,
                 track_frames=int(v3['track_frames_v3']),
                 y_look_curve=int(v3['y_look_curve_v3']) if int(v3['y_look_curve_v3']) >= 0 else None,
-                single_k_max=float(v3['single_k_max_v3']))
+                # 1차선에서만: 2차선 왼쪽 커브(장애물 지난 뒤)에서는 오른쪽 실선이 정상으로 1.47~1.7까지 누워
+                # 버려지면 차선을 놓쳐 멈춤(bag_obs_190819, 10/19)
+                single_k_max=float(v3['single_k_max_v3']) if in_lane1 else 9.0)
             now_i = time.time()
             ki = float(v3['ki_v3'])
             if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:

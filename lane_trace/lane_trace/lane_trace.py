@@ -164,16 +164,25 @@ def lane_detect_v2(image, guide_x, guide_slope, a_rad, b_rad, min_slope, roi_top
     return overlay, mask, float(np.clip(steering_rad, -0.4, 0.4))
 
 
-def lane_detect_v3(image, guide_x, guide_k, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
-                   y_eval=300, lane_width=459.0, k_left=-0.54, k_right=0.51, min_area=120, min_elong=3.0,
-                   k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60):
-    """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙의 위치·방향으로 조향.
+# 방식 3 선 추적 상태: 쪽별 마지막 선 (y_eval 위치 x, 기울기 k, 몇 프레임 전에 봤는지)
+_v3_track = {}
+
+
+def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
+                   y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
+                   k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=120.0, join_px=40.0, join_k=0.3,
+                   track_frames=15):
+    """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
-    흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외)
-    것만 쓰고, 화면 왼쪽 절반의 k<0은 왼쪽 선, 오른쪽 절반의 k>0은 오른쪽 선으로 모음. 차로 가운데 장애물 표시 박스의
-    가는 선은 open_k로 지워짐. roi_top 위(멀리 바닥)·roi_bot 아래(보닛과 그 위 물건)는 안 봄.
-    한쪽만 보이면 차로 폭(lane_width, y_eval 위치)과 그쪽 선의 기준 기울기(k_left/k_right)로 중앙을 추정.
-    기준값(10/19, 2차선 직선 중앙에 세운 차, 640x480): 왼쪽 x=60 k=-0.54, 오른쪽 x=519 k=+0.51 → 중앙 289, k -0.015"""
+    흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
+    쪽마다 직전 프레임 선 위치(없으면 기준 위치 guide_x ∓ lane_width/2)에 가장 가까운 후보 하나를 고르고(max_jump 안),
+    그 선과 한 줄에 있는 토막(점선, join_px·join_k 안)만 묶어 맞춤 — 옆 차로 선이 섞이지 않게(10/19 1차 주행: 왼쪽 위에
+    들어온 1차선 바깥 선이 점선과 섞여 중앙을 오른쪽으로 잘못 잡고 왼쪽으로 꺾어 점선을 넘음).
+    조향(+ = 오른쪽) = b_rad × (y_eval 위치 차로 중앙 − guide_x) + a_rad × (소실점 x − guide_vp).
+    직선 도로에서 차로 선은 모두 소실점(높이 vp_y)을 지나므로, 차가 옆으로 밀리면 중앙만 움직이고 소실점은 그대로,
+    차가 돌아가면 소실점이 움직임. 한쪽만 보이면 그 선의 vp_y 높이 x를 소실점으로, 차로 폭으로 중앙을 추정.
+    (예전 '중앙선 기울기' 오차는 옆으로 밀리기만 해도 원근 때문에 기울어 보여 위치 오차를 상쇄했음)
+    기준값(10/19, 2차선 직선 중앙에 세운 차, 640x480): 왼쪽 x=60 k=-0.54, 오른쪽 x=519 k=+0.51 → 중앙 289, 소실점 (296, -137)"""
     overlay = image.copy()
     # 흰 선 밝기 기준을 화면에 맞춰 정함: 바닥(중앙값) + l_rel × (상위 1% − 바닥). usb_cam 영상은 밝기 50으로 설정돼
     # 어둡고(바닥 14, 선 121~130) 조명에 따라 크게 바뀌어 고정 l_min으로는 놓침(10/19). 선이 없을 때 너무 내려가지 않게 l_floor.
@@ -186,31 +195,38 @@ def lane_detect_v3(image, guide_x, guide_k, a_rad, b_rad, l_min, s_max, open_k, 
     mask[:roi_top, :] = 0
     mask[roi_bot:, :] = 0
     n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
-    half = image.shape[1] / 2.0
-    sides = {'L': [], 'R': []}
+    cands = {'L': [], 'R': []}
     for i in range(1, n):
         if st[i, cv2.CC_STAT_AREA] < min_area:
             continue
         ys, xs = np.nonzero(lab == i)
         if np.ptp(ys) < 10:
             continue
-        (cx, _), (w, h), _ = cv2.minAreaRect(np.column_stack([xs, ys]).astype(np.float32))
+        (_, _), (w, h), _ = cv2.minAreaRect(np.column_stack([xs, ys]).astype(np.float32))
         if max(w, h) < min_elong * max(1.0, min(w, h)):
             continue
-        k = np.polyfit(ys, xs, 1)[0]
+        k, b = np.polyfit(ys, xs, 1)
         if not (k_min <= abs(k) <= k_max):
             continue
-        if k < 0 and cx < half:
-            sides['L'].append((xs, ys))
-        elif k > 0 and cx > half:
-            sides['R'].append((xs, ys))
+        cands['L' if k < 0 else 'R'].append(dict(xs=xs, ys=ys, k=float(k), x=float(k * y_eval + b)))
     fits = {}
-    for s, col in (('L', (255, 0, 0)), ('R', (0, 0, 255))):
-        if not sides[s]:
+    for s, sign, col in (('L', -1, (255, 0, 0)), ('R', 1, (0, 0, 255))):
+        tr = _v3_track.get(s)
+        tracked = tr is not None and tr[2] < track_frames
+        expect = tr[0] if tracked else guide_x + sign * lane_width / 2.0
+        if tr is not None:
+            _v3_track[s] = (tr[0], tr[1], tr[2] + 1)
+        near = [c for c in cands[s] if abs(c['x'] - expect) < max_jump]
+        for c in cands[s]:
+            overlay[c['ys'], c['xs']] = (128, 128, 128)
+        if not near:
             continue
-        xs = np.concatenate([p[0] for p in sides[s]]); ys = np.concatenate([p[1] for p in sides[s]])
+        seed = min(near, key=lambda c: abs(c['x'] - expect))
+        group = [c for c in cands[s] if abs(c['x'] - seed['x']) < join_px and abs(c['k'] - seed['k']) < join_k]
+        xs = np.concatenate([c['xs'] for c in group]); ys = np.concatenate([c['ys'] for c in group])
         k, b = np.polyfit(ys, xs, 1)
-        fits[s] = (float(k), float(k * y_eval + b))
+        fits[s] = (float(k), float(b))
+        _v3_track[s] = (float(k * y_eval + b), float(k), 0)
         overlay[ys, xs] = col
         cv2.line(overlay, (int(b + k * roi_top), roi_top), (int(b + k * roi_bot), roi_bot), (0, 255, 255), 2)
     cv2.line(overlay, (0, roi_bot), (image.shape[1], roi_bot), (0, 255, 0), 1)
@@ -218,24 +234,29 @@ def lane_detect_v3(image, guide_x, guide_k, a_rad, b_rad, l_min, s_max, open_k, 
         last_metrics.clear()
         last_metrics['l_min'] = l_min
         return overlay, mask, None
-    k_c0 = guide_k
+    at = lambda f, y: f[0] * y + f[1]
     if 'L' in fits and 'R' in fits:
-        x_c = (fits['L'][1] + fits['R'][1]) / 2.0
-        k_c = (fits['L'][0] + fits['R'][0]) / 2.0
+        x_c = (at(fits['L'], y_eval) + at(fits['R'], y_eval)) / 2.0
+        kl, bl = fits['L']; kr, br = fits['R']
+        y_vp = (br - bl) / (kl - kr) if abs(kl - kr) > 1e-3 else vp_y
+        x_vp = kl * y_vp + bl
     elif 'L' in fits:
-        x_c = fits['L'][1] + lane_width / 2.0
-        k_c = fits['L'][0] - k_left + k_c0
+        x_c = at(fits['L'], y_eval) + lane_width / 2.0
+        x_vp = at(fits['L'], vp_y)
     else:
-        x_c = fits['R'][1] - lane_width / 2.0
-        k_c = fits['R'][0] - k_right + k_c0
+        x_c = at(fits['R'], y_eval) - lane_width / 2.0
+        x_vp = at(fits['R'], vp_y)
     cv2.circle(overlay, (int(x_c), y_eval), 6, (0, 255, 0), -1)
     cv2.circle(overlay, (int(guide_x), y_eval), 6, (255, 255, 255), 2)
+    # 소실점은 화면 위 밖에 있으므로 맨 위에 x만 표시
+    cv2.line(overlay, (int(x_vp), 0), (int(x_vp), 12), (0, 255, 0), 3)
+    cv2.line(overlay, (int(guide_vp), 0), (int(guide_vp), 12), (255, 255, 255), 1)
     # obs_evade 정면 복귀 판단용 /lane_slope: 오른쪽 선 각도(rad, 양수). 오른쪽이 안 보이면 왼쪽 선을 좌우 반전한 값
     k_side = fits['R'][0] if 'R' in fits else -fits['L'][0]
-    last_metrics.update({'slope_avg': float(np.arctan2(1.0, k_side)), 'x_value': float(x_c), 'k_center': float(k_c),
+    last_metrics.update({'slope_avg': float(np.arctan2(1.0, k_side)), 'x_value': float(x_c), 'x_vp': float(x_vp),
                          'sides': ''.join(sorted(fits)), 'l_min': l_min})
-    # +rad = 오른쪽. 중앙이 기준보다 오른쪽(차가 왼쪽에 치우침)이거나 차로가 오른쪽으로 기울어 보이면(차가 왼쪽을 봄) 오른쪽으로
-    steering_rad = a_rad * (guide_k - k_c) + b_rad * (x_c - guide_x)
+    # +rad = 오른쪽: 중앙이 기준보다 오른쪽(차가 왼쪽으로 밀림) / 소실점이 오른쪽(차가 왼쪽을 봄)이면 오른쪽으로
+    steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_vp - guide_vp)
     return overlay, mask, float(np.clip(steering_rad, -0.4, 0.4))
 
 
@@ -456,15 +477,16 @@ class LaneMaskingNode(Node):
         self.b_rad_l1 = float(self.get_parameter('b_rad_l1').value)
 
         # 방식 3(detector=3, 정면 카메라 좌우 선 검출, 10/19) 값. 기준값은 2차선 직선 중앙에 세운 차에서 잰 것.
-        # guide_k_v3 = 차로 중앙선의 기울기(dx/dy), a_rad_v3 = 그 기울기 오차 가중치, b_rad_v3 = 중앙 위치 오차(px) 가중치
+        # guide_vp_v3 = 소실점 x(px), vp_y_v3 = 소실점 높이(px, 화면 위 밖이라 음수), a_rad_v3 = 소실점 오차(px) 가중치,
+        # b_rad_v3 = 중앙 위치 오차(px) 가중치
         dp = lambda n, v: self.declare_parameter(n, v, ParameterDescriptor(dynamic_typing=True))
-        for n, v in (('guide_x_v3', 289.0), ('guide_k_v3', -0.015), ('a_rad_v3', 0.8), ('b_rad_v3', 0.003),
+        for n, v in (('guide_x_v3', 289.0), ('guide_vp_v3', 296.0), ('a_rad_v3', 0.003), ('b_rad_v3', 0.004),
                      ('open_k_v3', 7), ('roi_top_v3', 40), ('roi_bot_v3', 320), ('y_eval_v3', 300),
-                     ('lane_width_v3', 459.0), ('k_left_v3', -0.54), ('k_right_v3', 0.51),
+                     ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
                      ('l_rel_v3', 0.6), ('l_floor_v3', 60)):
             dp(n, v)
-        self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_k_v3', 'a_rad_v3', 'b_rad_v3',
-                   'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'k_left_v3', 'k_right_v3',
+        self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
+                   'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
                    'l_rel_v3', 'l_floor_v3')}
 
         # Subscriber & Publisher
@@ -539,10 +561,10 @@ class LaneMaskingNode(Node):
         if detector == 3:
             v3 = self.v3
             result_img, mask_img, steer_rad = lane_detect(
-                image, float(v3['guide_x_v3']), float(v3['guide_k_v3']), a_rad=float(v3['a_rad_v3']),
+                image, float(v3['guide_x_v3']), float(v3['guide_vp_v3']), a_rad=float(v3['a_rad_v3']),
                 b_rad=float(v3['b_rad_v3']), l_min=self.l_min, s_max=self.s_max, open_k=int(v3['open_k_v3']),
                 detector=3, roi_top=int(v3['roi_top_v3']), roi_bot=int(v3['roi_bot_v3']), y_eval=int(v3['y_eval_v3']),
-                lane_width=float(v3['lane_width_v3']), k_left=float(v3['k_left_v3']), k_right=float(v3['k_right_v3']),
+                lane_width=float(v3['lane_width_v3']), vp_y=float(v3['vp_y_v3']),
                 l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']))
         else:
             result_img, mask_img, steer_rad = lane_detect(

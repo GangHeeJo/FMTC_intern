@@ -171,7 +171,7 @@ _v3_track = {}
 def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
                    y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
                    k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=80.0, max_jump_cold=200.0, join_px=40.0, join_k=0.3,
-                   track_frames=15, steer_max=0.4):
+                   track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0):
     """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
     선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
     흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
@@ -183,7 +183,10 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
     직선 도로에서 차로 선은 모두 소실점(높이 vp_y)을 지나므로, 차가 옆으로 밀리면 중앙만 움직이고 소실점은 그대로,
     차가 돌아가면 소실점이 움직임. 한쪽만 보이면 그 선의 vp_y 높이 x를 소실점으로, 차로 폭으로 중앙을 추정.
     (예전 '중앙선 기울기' 오차는 옆으로 밀리기만 해도 원근 때문에 기울어 보여 위치 오차를 상쇄했음)
-    기준값(10/19, 2차선 직선 중앙에 세운 차, 640x480): 왼쪽 x=60 k=-0.54, 오른쪽 x=519 k=+0.51 → 중앙 289, 소실점 (296, -137)"""
+    기준값(10/19, 2차선 직선 중앙에 세운 차, 640x480): 왼쪽 x=60 k=-0.54, 오른쪽 x=519 k=+0.51 → 중앙 289, 소실점 (296, -137)
+    sides='R'이면 오른쪽 선(2차선 실선)만 따라감(10/19 사용자 결정: 점선 쪽에서 옆 차로 선·트랙 밖 흰 차를 잡는 문제).
+    1차선은 lane_trace가 영상을 좌우 반전해 왼쪽 실선이 오른쪽에 오게 해서 같은 값으로 따라감.
+    굵기(max_thick, px)보다 두꺼운 덩어리(흰 차 차체 등)는 선이 아님."""
     overlay = image.copy()
     # 흰 선 밝기 기준을 화면에 맞춰 정함: 바닥(중앙값) + l_rel × (상위 1% − 바닥). usb_cam 영상은 밝기 50으로 설정돼
     # 어둡고(바닥 14, 선 121~130) 조명에 따라 크게 바뀌어 고정 l_min으로는 놓침(10/19). 선이 없을 때 너무 내려가지 않게 l_floor.
@@ -196,6 +199,7 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
     mask[:roi_top, :] = 0
     mask[roi_bot:, :] = 0
     n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
+    dt = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     cands = {'L': [], 'R': []}
     for i in range(1, n):
         if st[i, cv2.CC_STAT_AREA] < min_area:
@@ -209,9 +213,14 @@ def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k,
         k, b = np.polyfit(ys, xs, 1)
         if not (k_min <= abs(k) <= k_max):
             continue
+        d = dt[ys, xs]
+        if 2.0 * float(np.median(d[d >= np.percentile(d, 80)])) > max_thick:
+            continue
         cands['L' if k < 0 else 'R'].append(dict(xs=xs, ys=ys, k=float(k), x=float(k * y_eval + b)))
     fits = {}
     for s, sign, col in (('L', -1, (255, 0, 0)), ('R', 1, (0, 0, 255))):
+        if s not in sides:
+            continue
         tr = _v3_track.get(s)
         tracked = tr is not None and tr[2] < track_frames
         expect = tr[0] if tracked else guide_x + sign * lane_width / 2.0
@@ -484,11 +493,12 @@ class LaneMaskingNode(Node):
         for n, v in (('guide_x_v3', 289.0), ('guide_vp_v3', 296.0), ('a_rad_v3', 0.003), ('b_rad_v3', 0.004),
                      ('open_k_v3', 7), ('roi_top_v3', 40), ('roi_bot_v3', 320), ('y_eval_v3', 300),
                      ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
-                     ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4)):
+                     ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
+                     ('k_min_v3', 0.25), ('max_thick_v3', 45.0)):
             dp(n, v)
         self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
                    'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
-                   'l_rel_v3', 'l_floor_v3', 'steer_max_v3')}
+                   'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3')}
 
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
@@ -537,7 +547,13 @@ class LaneMaskingNode(Node):
 
         # 반전 중(1→2 변경)에는 뒤집힌 영상이 2→1 변경과 같아 보이므로 1차선 쪽 조건(2→1 변경 값)을 씀
         in_lane1 = self.lane_change_flag is True or self.lane_mirror
-        flip = (in_lane1 and self.flip_on_lane_change) or self.lane_mirror
+        # 1차선 주행 반전(flip_on_lane_change)은 차선 변경 중에는 안 함: 2→1 변경은 반전 없이, 1→2는 lane_mirror로 반전해야
+        # 두 변경이 서로 좌우 대칭이 됨(10/19)
+        flip = (self.lane_change_flag is True and self.flip_on_lane_change and not self.lane_changing) or self.lane_mirror
+        if flip != getattr(self, '_last_flip', False):
+            _v3_track.clear()  # 반전 전후로 선 위치가 좌우로 바뀌므로 추적 초기화
+            self.steer_hist = []
+        self._last_flip = flip
         if flip:
             image = cv2.flip(image, 1) # 이미지 반전
         if self.lane_changing:
@@ -566,7 +582,8 @@ class LaneMaskingNode(Node):
                 b_rad=float(v3['b_rad_v3']), l_min=self.l_min, s_max=self.s_max, open_k=int(v3['open_k_v3']),
                 detector=3, roi_top=int(v3['roi_top_v3']), roi_bot=int(v3['roi_bot_v3']), y_eval=int(v3['y_eval_v3']),
                 lane_width=float(v3['lane_width_v3']), vp_y=float(v3['vp_y_v3']),
-                l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']), steer_max=float(v3['steer_max_v3']))
+                l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']), steer_max=float(v3['steer_max_v3']),
+                sides=str(v3['sides_v3']), k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']))
         else:
             result_img, mask_img, steer_rad = lane_detect(
                 image, guide_x, guide_slope,

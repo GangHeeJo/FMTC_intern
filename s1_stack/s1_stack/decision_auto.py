@@ -5,12 +5,9 @@
 #   /light_stop, /cross_stop, /light_green (sign_detect) ─┼→ decision_auto → /cmd_auto, /crosswalk_active → cmd_mux
 #   /cmd_obs  (obs_evade)    ─┤
 #   /stop_line_y (lane_trace)─┘
-# 우선순위: 1) 신호등/횡단보도 정지 > 2) 장애물 회피 > 3) 평상시 차선 추종
-# (공식 설계 스펙: 비상정지 > 신호등/횡단보도 > 장애물회피 > 주차 > 차선추종. 비상정지는 cmd_mux가
-#  이 노드보다 바깥쪽에서 처리하므로 여기서는 신호등부터 시작. 2026-10-18: 장애물회피가 신호등보다
-#  위에 있던 순서를 스펙대로 뒤집음 — 차선변경 중 빨간불/횡단보도를 만나면 변경을 끝까지 계속하던
-#  문제를 고침. 이 우선순위는 stop_line_mode 값과 상관없이 항상 지켜짐 — 2026-10-20 병합 때
-#  stop_line_mode=False 경로에만 옛 순서가 남아있던 걸 통일함)
+# 우선순위: stop_line_mode=True면 1) 정지선 정지(cw_stop) > 2) 장애물 회피 > 3) 차선 추종.
+# stop_line_mode=False(기본값)면 1) 장애물 회피 > 2) 신호등/횡단보도 정지 > 3) 차선 추종 — 이 경로는
+# 10/19 gyungyoon 브랜치가 갈라질 당시의 순서를 그대로 둔 것(2026-10-20: main 단독 수정은 되돌림).
 #
 # stop_line_mode (2026-10-19~, 기본 False): 신호등 정지를 "신호등 bbox 크기로 거리 추정" 대신
 # "상단 카메라가 본 횡단보도 정지선 위치(/stop_line_y)에 도달했는지"로 판단하는 대안 모드.
@@ -89,7 +86,7 @@ class MotionDecision(Node):
         self.sub_green = self.create_subscription(Bool, '/light_green', self.green_cb, 10)
         self.sub_mode = self.create_subscription(UInt8, '/drive_mode', self.mode_cb, 10)
         
-        # 추가: 장애물 회피 명령 구독 (신호등/횡단보도 정지 다음 순위, 평상시 차선추종보다는 위)
+        # 추가: 장애물 회피 명령 구독 (stop_line_mode=False 기본값에서는 최우선, true면 정지선 다음)
         self.sub_obs = self.create_subscription(Twist, '/cmd_obs', self.obs_cb, 10)
 
         # Publisher: 최종 제어 명령
@@ -204,18 +201,21 @@ class MotionDecision(Node):
         if self.stop_line_mode:
             recent_line = any(current_time - t < self.cw_line_recent for t, _ in self.line_hist)
             self.pub_cw_active.publish(Bool(data=self.cw_state != 'wait' or recent_line))
-
-        # [우선순위 1] 정지 조건 확인 (정지선 모드: 위에서 계산한 cw_stop / 아니면 신호등 OR 횡단보도)
-        # — 장애물 회피 중이어도 신호가 우선(2026-10-18: 차선변경 중 빨간불을 만나면 변경을 끝까지 계속하던 문제를 고침)
-        if cw_stop or (not self.stop_line_mode and (self.stop_by_light or self.stop_by_crosswalk)):
+        if cw_stop:
             msg.angular.z = self.current_lane_cmd.angular.z
             msg.linear.x = 0.0
-            self.get_logger().info('STOP SIGNAL ACTIVE')
+            self.get_logger().info('STOP SIGNAL ACTIVE (stop line)')
 
-        # [우선순위 2] 장애물 회피 명령 확인 (최근 0.2초 이내 수신된 경우만 유효)
+        # [우선순위 1] 장애물 회피 명령 확인 (최근 0.2초 이내 수신된 경우만 유효)
         elif (current_time - self.last_obs_time) < 0.2:
             msg = self.current_obs_cmd
             self.get_logger().info('PRIORITY: OBSTACLE EVASION ACTIVE')
+
+        # [우선순위 2] 정지 조건 확인 (신호등 OR 횡단보도). 정지선 모드는 위에서 처리
+        elif not self.stop_line_mode and (self.stop_by_light or self.stop_by_crosswalk):
+            msg.angular.z = self.current_lane_cmd.angular.z
+            msg.linear.x = 0.0
+            self.get_logger().info('STOP SIGNAL ACTIVE')
 
         # [우선순위 3] 일반 주행 (차선 인지)
         else:

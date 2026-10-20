@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # lane_trace: 차선 카메라 영상을 보고 조향각을 계산해 /cmd_lane으로 내보내는 노드.
-# 늘 "오른쪽 차선 하나"만 보고 따라감 — 2차선 주행 중엔 오른쪽 실선, 1차선 주행 중(/lane_change_flag=True)엔
-# 오른쪽 점선을 쫓아감(과거엔 이미지를 반전해서 같은 로직을 재사용했지만 지금은 기본적으로 안 씀).
-# 검출 방식은 2가지(detector 파라미터로 선택):
-#   1 = 기존 방식: HLS로 흰색만 남기고 → Canny 엣지 → HoughLinesP로 직선 검출
-#   2 = lane_detect_v2: 흰 덩어리의 굵기/길이/모양으로 점선·실선·주차선·흰 차체를 구분해서 더 정확하게 고름
+# 검출 방식은 3가지(detector 파라미터로 선택):
+#   1 = 기존 방식: HLS로 흰색만 남기고 → Canny 엣지 → HoughLinesP로 직선 검출. "오른쪽 차선 하나"만 보고 따라감
+#       — 2차선 주행 중엔 오른쪽 실선, 1차선 주행 중(/lane_change_flag=True)엔 오른쪽 점선을 쫓아감
+#       (과거엔 이미지를 반전해서 같은 로직을 재사용했지만 지금은 기본적으로 안 씀)
+#   2 = lane_detect_v2: 흰 덩어리의 굵기/길이/모양으로 점선·실선·주차선·흰 차체를 구분해서 더 정확하게 고름(오른쪽만)
+#   3 = lane_detect_v3 (2026-10-19~, 정면 카메라용): 왼쪽·오른쪽 선을 각각 찾아 차로 중앙 + 소실점으로 조향.
+#       카메라가 "오른쪽만 보이게" 손으로 돌려져 있던 1·2와 달리, 카메라를 정면 고정한 채 양쪽 선을 다 봄
 # 결과(조향각)는 /cmd_lane으로, 그 외에 obs_evade가 차선 변경 판단에 쓰는 보조 토픽
-# (/lane_detected, /lane_slope, /lane_line_len)도 같이 발행함.
+# (/lane_detected, /lane_slope, /lane_line_len, /lane_lines)과, decision_auto가 신호등 정지 위치 판단에
+# 쓰는 횡단보도 정지선 위치(/stop_line_y, crosswalk_detect() 함수)도 같이 발행함.
 
 import rclpy
 from rclpy.node import Node

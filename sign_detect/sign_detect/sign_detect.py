@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # sign_detect: 전방 카메라 영상에서 YOLOv8로 횡단보도/신호등을 찾아서
-# /cross_stop, /light_stop (둘 다 Bool, True면 "정지해야 함")을 발행하는 노드.
-# decision_auto가 이걸 받아서 차선 추종보다 우선으로 정지 명령을 내림.
+# /cross_stop, /light_stop, /light_green (전부 Bool, True면 "정지해야 함"/"초록불 보임")을 발행하는 노드.
+# decision_auto가 이걸 받아서 차선 추종보다 우선으로 정지 명령을 내림
+# (stop_line_mode=true면 /light_stop·/light_green만 쓰고 /cross_stop은 안 씀 — decision_auto 참고).
 # CPU 추론이라 느릴 수 있음(코어 많이 먹음) — 실행 시 taskset으로 전용 코어를 따로 배정해서 씀.
 
 import rclpy

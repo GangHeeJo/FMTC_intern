@@ -7,8 +7,15 @@
 #   LANE2 --(전방 장애물)--> TO_LANE1 --(새 차선 선 확인+정면 복귀)--> LANE1
 #   LANE1 --(전방 장애물)--> TO_LANE2 --(새 차선 선 확인+정면 복귀)--> LANE2
 # mode='return'이면 LANE1에서 "옆 장애물을 지나쳤는지"를 라이다로 봐서 자동으로 TO_LANE2로 돌아감.
-# change_mode='camera'(기본)면 차선 변경 완료 판단을 "시간"이 아니라 lane_trace가 보내는
-# /lane_detected(선 사라짐→새 선 잡힘), /lane_slope(기울기가 목표 차선 기준에 들어왔는지)로 함.
+# 차선 변경 완료 판단 방식(change_mode):
+#   'camera' = 시간이 아니라 lane_trace가 보내는 /lane_detected(선 사라짐→새 선 잡힘),
+#              /lane_slope(기울기가 목표 차선 기준에 들어왔는지)로 판단
+#   'timed'  = change_steer/change_time_s에 적힌 단계별 조향·시간을 그대로 따름
+#   'vision' (2026-10-19~) = /lane_lines(lane_trace가 보는 화면의 선 위치·기울기 목록)로,
+#              새 차선 쪽 선이 기준 위치/기울기에 도달하면 다음 단계로 넘김 — 속도가 바뀌어도
+#              시간표를 다시 맞출 필요가 없음
+# drive_mode(/drive_mode, AUTO=1)가 아니거나 decision_auto가 보낸 /crosswalk_active(정지선 구간)가
+# 켜져 있으면 전방 장애물 감지를 쉼.
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan

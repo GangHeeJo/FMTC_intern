@@ -2,13 +2,19 @@
 # decision_auto: 자율주행 쪽 입력 여러 개(차선 추종, 신호등/횡단보도 정지, 장애물 회피)를
 # 우선순위에 따라 하나의 /cmd_auto 명령으로 합치는 노드. cmd_mux가 이걸 받아서 최종 출력함.
 #   /cmd_lane (lane_trace)   ─┐
-#   /light_stop, /cross_stop (sign_detect) ─┼→ decision_auto → /cmd_auto → cmd_mux
-#   /cmd_obs  (obs_evade)    ─┘
+#   /light_stop, /cross_stop, /light_green (sign_detect) ─┼→ decision_auto → /cmd_auto, /crosswalk_active → cmd_mux
+#   /cmd_obs  (obs_evade)    ─┤
+#   /stop_line_y (lane_trace)─┘
 # 우선순위: 1) 신호등/횡단보도 정지 > 2) 장애물 회피 > 3) 평상시 차선 추종
 # (공식 설계 스펙: 비상정지 > 신호등/횡단보도 > 장애물회피 > 주차 > 차선추종. 비상정지는 cmd_mux가
 #  이 노드보다 바깥쪽에서 처리하므로 여기서는 신호등부터 시작. 2026-10-18: 장애물회피가 신호등보다
 #  위에 있던 순서를 스펙대로 뒤집음 — 차선변경 중 빨간불/횡단보도를 만나면 변경을 끝까지 계속하던
-#  문제를 고침)
+#  문제를 고침. 이 우선순위는 stop_line_mode 값과 상관없이 항상 지켜짐 — 2026-10-20 병합 때
+#  stop_line_mode=False 경로에만 옛 순서가 남아있던 걸 통일함)
+#
+# stop_line_mode (2026-10-19~, 기본 False): 신호등 정지를 "신호등 bbox 크기로 거리 추정" 대신
+# "상단 카메라가 본 횡단보도 정지선 위치(/stop_line_y)에 도달했는지"로 판단하는 대안 모드.
+# update_crosswalk()가 정지선 도달→신호 확인→출발까지의 작은 상태머신(cw_state)을 담당함.
 
 import rclpy
 from rclpy.node import Node

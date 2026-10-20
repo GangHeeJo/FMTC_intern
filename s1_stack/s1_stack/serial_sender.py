@@ -66,6 +66,8 @@ class SerialSender(Node):
         self.timer = self.create_timer(0.05, self.on_timer)
 
     def on_params(self, params):
+        """`ros2 param set serial_sender th_scale <값>`으로 노드를 안 껐다 켜도 속도 스케일을 바꿀 수 있게 함.
+        범위(0~1000) 밖이면 거부(successful=False)하고 기존 값을 유지함."""
         for p in params:
             if p.name == 'th_scale':
                 v = int(p.value)

@@ -1,6 +1,6 @@
 # S1 자율주행차 (FMTC)
 
-> `main`은 2026-10-18에 `gyungyoon` 브랜치의 10/17 실차 검증 결과(장애물 2개 차선 변경 완성, 신호등/횡단보도 정지)로 동기화됨. 최신 상태와 실행 명령은 [docs/summary/handoff_2026-10-17.md](docs/summary/handoff_2026-10-17.md) 한 장만 먼저 읽으세요. 아래 "빌드 & 실행"은 코드 구조 설명용이고, 실제 실행 명령(터미널 순서, 파라미터 값 등)은 그 문서에 있습니다.
+> `main`은 2026-10-20에 `gyungyoon` 브랜치의 10/19 실차 결과(차선 카메라 정면 재장착, 방식 3 조향, 횡단보도 정지선, vision 차선 변경)로 동기화됨. 최신 상태와 실행 명령은 [docs/summary/handoff_2026-10-19.md](docs/summary/handoff_2026-10-19.md) 한 장만 먼저 읽으세요(그 전 단계는 [10/17 인수인계](docs/summary/handoff_2026-10-17.md)). 아래 "빌드 & 실행"은 코드 구조 설명용이고, 실제 실행 명령(터미널 순서, 파라미터 값 등)은 그 문서에 있습니다.
 
 서울대학교 FMTC에서 운영하는 1/10 스케일 자율주행 RC카 "S1"의 ROS2(humble) 소프트웨어 스택. 카메라(차선/표지판 인식), 라이다(장애물 회피), 조이스틱/아두이노 제어를 통합해 차선 추종 + 신호등/횡단보도 정지 + 장애물 회피 자율주행을 수행한다.
 
@@ -46,15 +46,15 @@ src/
 ## 데이터 흐름
 
 ```
-/cam_lane  → lane_trace   → /cmd_lane  ─┐
-/cam_front → sign_detect  → /light_stop, /cross_stop ─┤
-/scan      → obs_evade    → /cmd_obs   ─┼→ decision_auto → /cmd_auto ┐
+/cam_lane  → lane_trace   → /cmd_lane, /stop_line_y ─┐
+/cam_front → sign_detect  → /light_stop, /cross_stop, /light_green ─┤
+/scan      → obs_evade    → /cmd_obs   ─┼→ decision_auto → /cmd_auto, /crosswalk_active ┐
                                          │  (우선순위: 정지신호 > 장애물 > 차선)   │
 /joy → joy_to_twist → /cmd_manual ──────┘                              ├→ cmd_mux → /cmd_out → serial_sender → Arduino(S1.ino)
                                                                         │   (조이스틱으로 MANUAL/AUTO/STOP 모드 전환)
 ```
 
-- `decision_auto`: 신호등/횡단보도 정지 → 장애물 회피(0.2s 이내 수신 시) → 평상시 차선 추종, 순으로 `/cmd_auto` 하나로 병합(2026-10-18: 장애물 회피가 신호 정지보다 위에 있던 순서를 공식 설계 스펙대로 뒤집음).
+- `decision_auto`: 신호등/횡단보도 정지 → 장애물 회피(0.2s 이내 수신 시) → 평상시 차선 추종, 순으로 `/cmd_auto` 하나로 병합(2026-10-18: 장애물 회피가 신호 정지보다 위에 있던 순서를 공식 설계 스펙대로 뒤집음). `stop_line_mode: true`면 신호등 정지 판단을 `/stop_line_y`(차선 카메라가 본 정지선 위치) 기준으로 바꿈 — 아래 `decision_auto` 상세 참고.
 - `cmd_mux`: 조이스틱 버튼(A=자동, B=수동, **Y=정지**, Xbox 컨트롤러 기준 `btn_stop: 3`)으로 모드 전환, 자동/수동 명령에 타임아웃 적용해 신호 끊기면 자동 정지(failsafe).
 - `serial_sender`: `geometry_msgs/Twist`를 `"TH:<-1000..1000> STN:<-1000..1000>"` 텍스트 라인으로 변환해 시리얼로 전송. rosserial 아님, 자체 프로토콜.
 
@@ -63,27 +63,30 @@ src/
 ### 카메라
 
 **`lane_trace`** (node: `lane_masking_node`)
-- Sub: `/cam_lane/image_raw` (`sensor_msgs/Image`), `/lane_change_flag`·`/lane_changing` (`std_msgs/Bool`)
-- Pub: `/cmd_lane` (`Twist`), `/lane_detected` (`Bool`), `/lane_slope`·`/lane_line_len` (`Float32`) — 뒤 셋은 `obs_evade`가 차선 변경 완료/출발 차선 판단에 씀
-- 검출 방식 2개(`detector` 파라미터): 방식 1(기존, HLS 필터 → Canny → `HoughLinesP`), 방식 2(`lane_detect_v2`, 흰 덩어리의 굵기·길이·채움비·볼록도로 점선/실선/주차선/흰 차를 구분). 2·1차선 각각 `detector`/`detector_l1`로 따로 고를 수 있음. **항상 오른쪽(2차선 실선 또는 1차선 점선) 한쪽만 봄**, 좌측 차선 로직 없음.
-- `lane_change_flag`가 True면 1차선 기준값(`guide_x_l1` 등)으로 전환해 같은 오른쪽 점선을 계속 따라감 — 과거처럼 이미지를 반전해서 보는 방식은 `flip_on_lane_change`(기본 꺼짐)로만 남아있음.
+- Sub: `/cam_lane/image_raw` (`sensor_msgs/Image`), `/lane_change_flag`·`/lane_changing`·`/lane_mirror` (`std_msgs/Bool`), `/drive_mode` (`UInt8`)
+- Pub: `/cmd_lane` (`Twist`), `/lane_detected` (`Bool`), `/lane_slope`·`/lane_line_len`·`/stop_line_y` (`Float32`), `/lane_lines` (`Float32MultiArray`) — `obs_evade`가 차선 변경 완료/출발 차선 판단/vision 차선 변경에 씀
+- 검출 방식 3개(`detector` 파라미터): 방식 1(기존, HLS 필터 → Canny → `HoughLinesP`, **오른쪽 한쪽만 봄**), 방식 2(`lane_detect_v2`, 흰 덩어리의 굵기·길이·채움비·볼록도로 점선/실선/주차선/흰 차를 구분, 오른쪽만), 방식 3(`lane_detect_v3`, **정면 카메라용**, 왼쪽·오른쪽 선을 각각 찾아 차로 중앙 + 소실점으로 조향, 커브 대응 포함). 2·1차선·차선 변경 중을 각각 `detector`/`detector_l1`/`detector_change`로 따로 고를 수 있음.
+- `lane_change_flag`가 True면 1차선 기준값(`guide_x_l1` 등)으로 전환. 영상을 좌우 반전해서 보는 옛 방식은 `flip_on_lane_change`(기본 꺼짐)로 남아있고, 정면 카메라(방식 3)에서는 `flip_target`/`lane_mirror`로 1→2 변경을 2→1의 좌우 반전으로 재사용하는 방식을 씀.
+- `crosswalk_detect()`로 상단 카메라 화면에서 횡단보도 정지선을 Hough 직선으로 찾아 `/stop_line_y`(화면 y좌표, 없으면 -1)를 매 프레임 발행 — `decision_auto`의 `stop_line_mode`가 이걸로 신호등 정지 위치를 판단. ROI·줄무늬 판별 등 튜닝 상수는 아직 코드에 하드코딩돼 있어 파라미터로 못 바꿈.
 - 차선 미검출 프레임에는 `lost_hold_s`(차선별로 다를 수 있음) 동안 직전 조향값을 유지, 그 이상 못 보면 중앙으로 복귀. 최근 구간 검출률이 `min_detect_ratio` 미만이면 정지.
 - 속도는 `linear_speed` 파라미터(기본 0.5), 조향은 rad→`angular.z`(-1000~1000 스케일)로 변환.
 
 **`sign_detect`** (node: `sign_detect`)
 - Sub: `/cam_front/image_raw` (`sensor_msgs/Image`)
-- Pub: `cross_stop` → `/cross_stop`, `light_stop` → `/light_stop` (둘 다 `std_msgs/Bool`)
-- YOLOv8(`best_0808.pt`)로 매 프레임 추론. 클래스: `0=cross-walk, 1=traffic-light-green(무시), 2=traffic-light-red, 3=traffic-light-yellow`.
-- 횡단보도는 bbox 중심이 화면 가운데 10~90% 안에 있을 때만 유효로 침, 신호등은 bbox 크기(`min_bbox_size=15500`) 이상일 때만(= 충분히 가까워졌을 때만) 유효.
-- 최근 5프레임 중 3프레임 이상 감지돼야 최종 정지 신호로 확정(노이즈 필터링).
+- Pub: `cross_stop` → `/cross_stop`, `light_stop` → `/light_stop`, `light_green` → `/light_green` (전부 `std_msgs/Bool`)
+- YOLOv8(`best_0808.pt`)로 매 프레임 추론. 클래스: `0=cross-walk, 1=traffic-light-green, 2=traffic-light-red, 3=traffic-light-yellow`.
+- 횡단보도는 bbox 중심이 화면 가운데 10~90% 안에 있을 때만 유효로 침, 신호등(빨강·노랑·초록 공통)은 확신도(`light_conf`, 기본 0.3)와 bbox 크기(`min_bbox_size`, 기본 15500, = 충분히 가까워졌을 때) 둘 다 넘어야 유효. `decision_auto`가 `stop_line_mode`로 거리를 대신 판단할 땐 `min_bbox_size`를 낮춰 써도 됨(정지선 모드 설정은 2000).
+- 최근 5프레임 중 3프레임 이상 감지돼야 최종 신호로 확정(노이즈 필터링) — 빨강/노랑/횡단보도/초록 전부 동일.
 
 ### 라이다 / 장애물 회피
 
 **`obs_evade`** (실제 실행 파일은 `obs_evade.py`. `obs_evade2.py`는 예전 개선판 초안, `setup.py`에 연결 안 돼있어 `ros2 run`으로 안 돌아감 — 지금 쓰는 상태머신 버전으로 대체됨)
-- Sub: `/scan` (`LaserScan`), `/lane_detected`·`/lane_line_len` (lane_trace가 보냄), `/lane_slope`
-- Pub: `/cmd_obs` (`Twist`), `/lane_change_flag`, `/lane_changing` (`Bool`)
-- 상태머신(`LANE2`→`TO_LANE1`→`LANE1`→`TO_LANE2`→…)으로 동작. 전방 ROI(`roi_near`~`roi_far`, 좌우 `roi_half_width`)에 장애물이 연속 `min_scans`번 잡히면 반대 차선으로 변경 시작. 변경 완료는 시간이 아니라 **lane_trace가 보내는 `/lane_detected`로 "원래 선이 사라지고 새 선이 잡혔는지"를 확인**(`change_mode: camera`)해서 판단, 이후 `/lane_slope`가 목표 기울기에 들어오면 정면 복귀 완료로 보고 넘김.
-- `mode` 파라미터로 `toggle`(장애물 만날 때마다 반대 차선, **2026-10-17 실차 검증된 설정**)과 `return`(장애물을 옆으로 지나치면 자동으로 원래 차선 복귀) 중 선택 — `return` 모드는 코드는 있지만 실차 미검증.
+- Sub: `/scan` (`LaserScan`), `/lane_detected`·`/lane_line_len`·`/lane_lines` (lane_trace가 보냄), `/lane_slope`, `/crosswalk_active` (decision_auto), `/drive_mode` (`UInt8`)
+- Pub: `/cmd_obs` (`Twist`), `/lane_change_flag`, `/lane_changing`, `/lane_mirror` (`Bool`)
+- 상태머신(`LANE2`→`TO_LANE1`→`LANE1`→`TO_LANE2`→…)으로 동작. 전방 ROI(`roi_near`~`roi_far`, 좌우 `roi_half_width`)에 장애물이 연속 `min_scans`번 잡히면 반대 차선으로 변경 시작 — `drive_mode`가 AUTO(1)가 아니거나 `/crosswalk_active`(정지선 구간)면 감지 안 함.
+- 차선 변경 완료 판단 방식 3개(`change_mode`): `camera`(lane_trace의 `/lane_detected`로 "원래 선이 사라지고 새 선이 잡혔는지"를 확인 후 `/lane_slope`가 목표 기울기에 들어오면 완료), `timed`(단계별 고정 시간), **`vision`**(2026-10-19 추가, 시간 대신 `/lane_lines`로 보는 새 차선의 실제 위치·기울기로 각 단계 종료를 판단 — 속도가 바뀌어도 재조정이 필요 없음).
+- `mode` 파라미터로 `toggle`(장애물 만날 때마다 반대 차선, 2026-10-17 실차 검증)과 `return`(장애물을 옆으로 지나치면 자동으로 원래 차선 복귀, 2026-10-19 실차 검증) 중 선택.
+- `mirror_to_lane2: true`면 1→2 변경도 2→1과 같은 절차를 쓰되 영상·조향만 좌우 반전(`/lane_mirror`로 lane_trace에 알림).
 - 평소(차선 변경 중이 아닐 때)엔 `/cmd_obs`에 아무것도 발행하지 않음 → `decision_auto`가 차선 추종으로 자연히 돌아감.
 
 **`gap_follow`** / **`wall_follow`**
@@ -101,15 +104,15 @@ src/
 
 **`cmd_mux`**: Sub `/joy`(모드 전환 버튼), `/cmd_manual`, `/cmd_auto` → Pub `/cmd_out` (`Twist`), `/drive_mode` (`UInt8`). MANUAL/AUTO/STOP 3모드, 모드 전환 시 0.2초 정지 유예, AUTO 모드에서 0.3초 이상 `/cmd_auto`가 안 오면 자동으로 MANUAL로 강제 전환.
 
-**`decision_auto`**: 위 데이터 흐름 설명대로 `/cmd_lane`+`/light_stop`+`/cross_stop`+`/cmd_obs` → `/cmd_auto`.
+**`decision_auto`**: 위 데이터 흐름 설명대로 `/cmd_lane`+`/light_stop`+`/cross_stop`+`/cmd_obs` → `/cmd_auto`. `stop_line_mode: true`(기본 `false`)면 `/stop_line_y`(lane_trace, 횡단보도 정지선 위치) + `/light_stop`·`/light_green`(sign_detect)으로 정지/출발을 판단 — 정지선 도달 후엔 초록불이 `go_green_s`초 이상 계속 보이거나 수동 모드로 바뀌기 전까지 정지 상태 유지. 정지선 구간 동안 `/crosswalk_active`를 발행해 `obs_evade`가 전방 감지를 쉬게 함.
 
-**`serial_sender`**: Sub `/cmd_out` (`Twist`), `/calib/start` (`std_msgs/Empty`) → 시리얼로 `TH:/STN:` 텍스트 전송. 캘리브레이션 명령 수신 시 6초간 0,0 고정.
+**`serial_sender`**: Sub `/cmd_out` (`Twist`), `/calib/start` (`std_msgs/Empty`) → 시리얼로 `TH:/STN:` 텍스트 전송. 캘리브레이션 명령 수신 시 6초간 0,0 고정. 속도 스케일 `th_scale`은 `ros2 param set`으로 노드 재시작 없이 즉시 변경 가능.
 
 **`Arduino/S1/S1.ino`**: 시리얼로 `TH:/STN:` 라인을 받아 파싱, 모터 PWM/조향 서보 구동. 신호가 끊기면(타임아웃) 자체 failsafe로 정지.
 
 ## 빌드 & 실행
 
-> 아래는 기본 빌드/실행 구조만 설명. **실제 차에서 돌릴 때 쓸 파라미터 값(특히 `lane_trace`/`obs_evade`의 `--params-file`)과 CPU 코어 배정(`taskset`)은 [10/17 인수인계](docs/summary/handoff_2026-10-17.md) 그대로 따라 하세요** — 기본값으로 그대로 실행하면 조향이 쏠리거나 속도가 너무 빠름.
+> 아래는 기본 빌드/실행 구조만 설명. **실제 차에서 돌릴 때 쓸 파라미터 값(특히 `lane_trace`/`obs_evade`/`decision_auto`의 `--params-file`)과 CPU 코어 배정(`taskset`)은 [10/19 인수인계](docs/summary/handoff_2026-10-19.md) 그대로 따라 하세요** — 기본값으로 그대로 실행하면 조향이 쏠리거나 속도가 너무 빠름. `obstacle_1017.yaml`(카메라 오른쪽 각도 전제)과 `front_1019.yaml`(카메라 정면 전제, 지금 기준)은 서로 다른 카메라 장착을 가정하므로 섞어 쓰면 안 됨.
 
 ```bash
 # colcon 워크스페이스 루트(이 src/의 상위 폴더)에서
@@ -128,14 +131,16 @@ OMP_NUM_THREADS=6 taskset -c 6-11 ros2 run sign_detect sign_detect --ros-args -p
 ```
 `sign_detect`의 `model_path`는 필수 파라미터(기본값 없음, 안 주면 바로 에러). 디버그용 OpenCV 창(`cv2.imshow`)을 보려면 `lane_trace`/`sign_detect`에 `-p debug_view:=true` 추가(기본 꺼짐, `obs_evade`는 영상 처리가 없어서 해당 없음).
 
-## 알려진 이슈 (2026-10-17 실차 검증 기준)
+## 알려진 이슈 (2026-10-19 실차 검증 기준)
 
-- **밤 조명·신호등 근처에서 흰 선 검출이 깨짐**: 흰 선이 푸르스름(밤)하거나 붉게(신호등 근처) 찍히면서 색 기준(HLS `l_min`/`s_max`)을 벗어남. 낮에만 검증됨. 근본 해결은 화이트밸런스 보정 등 조명-불변 검출 방식 필요.
+- **차선 카메라는 삼발이(높은 곳)에 정면 고정, 보닛 카메라는 신호등용으로 고정** — 경기 규정상 위치/방향을 바꿀 수 없음(10/20 주최측 공지). 10/19 이전엔 ROI 가정이 실제 장착 각도와 안 맞아 카메라를 손으로 오른쪽으로 돌려 썼는데, 10/19에 정면으로 되돌리고 양쪽 차선을 보는 방식 3(`lane_detect_v3`)으로 전환함 — 자세한 배경은 [10/19 현장 기록](docs/records/field_notes_2026-10-19.md) 1장.
+- `lane_trace`의 `crosswalk_detect()`(횡단보도 정지선 검출) 튜닝 상수 10여 개가 함수 기본값으로 하드코딩돼 있어 파라미터로 못 바꿈 — 현장에서 조정하려면 코드 수정 + 재빌드 필요.
+- `decision_auto`의 `stop_line_mode` 기본값은 `false` — 파라미터 파일 없이 기본값으로 띄우면 신호등 판단이 bbox 크기 기준으로 돌아감(정지선 기준 아님). 경기 때는 `front_1019.yaml`(또는 그 후속) 파라미터 파일을 반드시 줄 것.
+- **밤 조명·신호등 근처에서 흰 선 검출이 깨짐**: 흰 선이 푸르스름(밤)하거나 붉게(신호등 근처) 찍히면서 색 기준을 벗어남. 10/19부터는 화면 밝기에 맞춰 흰색 기준을 자동 조절(`l_rel`/`l_floor`)하는 방식으로 일부 완화됐으나 낮 환경에서만 검증됨.
 - **`sign_detect`(YOLO, CPU 추론)가 1~3초씩 멈춤**: CPU 온도 80도대까지 올라가며 멈춰서 `decision_auto`의 STALE 판정을 유발. 장애물 회피 시험 때는 `decision_auto`를 `require_signals:=false`로 띄워서 끊김 감지만 꺼서 우회 — **이 설정은 경기용으로 쓰면 안 됨**(신호 끊김에 대한 안전장치가 꺼짐). 근본 해결은 모델 경량화(`imgsz` 축소, OpenVINO 등).
 - `obs_evade`의 출발 차선 자동 판단(`start_lane:=0`)이 특정 구간(상자 옆 2차선)에서 오판. 지금은 `start_lane`을 1/2로 직접 지정해서 씀.
-- `obs_evade`의 `mode: return`(장애물을 옆으로 지나치면 자동 복귀)은 코드는 있지만 실차 미검증 — 검증된 건 `mode: toggle`(장애물 만날 때마다 반대 차선)뿐.
-- 차선 변경 타이밍(`cam_min_s`/`cam_max_s`/`straighten_max_s` 등)은 특정 속도(`change_speed`)·배터리 상태에서 맞춘 경험값 — 속도가 바뀌면 재조정 필요.
-- Arduino 조향 각도 센서(A4, 8번 선) 접촉 불량이 이틀 연속 발생 — 바퀴가 명령 없이 제멋대로 움직이면 이 선부터 확인 (하드웨어, 미해결).
+- 차선 변경·장애물 감지 거리 값(`roi_near`/`roi_far`/`min_points` 등)은 속도를 실측하지 않고 PWM 비례로 환산한 추정치 — 실제 속도 측정 후 재조정 필요.
+- Arduino 조향 각도 센서(A4, 8번 선) 접촉 불량이 여러 날 발생 — 바퀴가 명령 없이 제멋대로 움직이면 이 선부터 확인 (하드웨어, 미해결).
 - **DBSCAN 라이다 클러스터링 미구현**: 예전 ROS1 코드(결과보고서 PDF)엔 `sklearn.cluster.DBSCAN` 기반 장애물 클러스터링이 있었는데, 현재 `obs_evade`/`gap_follow`/`wall_follow`는 전부 단순 ROI/거리 임계값 방식임 (`ganghee` 브랜치에 DBSCAN 포팅판이 있으나 미병합). 김민준 담당 파트.
 - **주차(parking) 기능 전체가 없음**: HW엔 주차용 초음파센서(HC-SR04 ×2)가 있는데 현재 repo엔 초음파 관련 노드/토픽이 아예 없음.
 

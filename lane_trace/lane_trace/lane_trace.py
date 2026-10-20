@@ -16,7 +16,7 @@ import numpy as np
 import time
 import cv2
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, UInt8, Float32MultiArray
 from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 
@@ -179,12 +179,289 @@ def lane_detect_v2(image, guide_x, guide_slope, a_rad, b_rad, min_slope, roi_top
     return overlay, mask, float(np.clip(steering_rad, -0.4, 0.4))
 
 
+def line_features(image, s_max=30, open_k=7, roi_top=40, roi_bot=320, y_eval=300, l_rel=0.6, l_floor=60, min_area=120):
+    """화면(반전 안 한 원본, 640x480)의 흰 선 후보 목록: [x(y_eval 높이), 기울기 dx/dy, 길이(px)] 의 평평한 리스트.
+    obs_evade vision 차선 변경이 '점선·실선이 화면 어디에 어떤 기울기로 보이는지'로 단계를 넘기는 데 씀(10/19).
+    흰 선 기준은 방식 3과 같음(바닥 + l_rel × (상위 1% − 바닥))"""
+    L = cv2.cvtColor(image[roi_top:roi_bot], cv2.COLOR_BGR2HLS)[..., 1]
+    med, top = np.median(L), np.percentile(L, 99)
+    mask = remove_thin(color_filter(image, int(max(l_floor, med + l_rel * (top - med))), s_max), open_k)
+    mask[:roi_top, :] = 0
+    mask[roi_bot:, :] = 0
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
+    out = []
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] < min_area:
+            continue
+        ys, xs = np.nonzero(lab == i)
+        if np.ptp(ys) < 10:
+            continue
+        k, b = np.polyfit(ys, xs, 1)
+        if abs(k) > 3.0:
+            continue
+        out += [float(k * y_eval + b), float(k), float(np.ptp(ys) * np.sqrt(1.0 + k * k))]
+    return out
+
+
+def crosswalk_detect(image, roi_top=60, roi_bot=350, th_rel=0.5, th_min=25, min_len=120, max_k=0.45,
+                     offsets=(20, 35, 50, 70, 95, 120, 150, 180), run_min=12, run_max=160, z_need=3,
+                     reg_w=5.0, reg_g=4.0, rows_need=2, nz_need=5):
+    """상단 카메라 화면(640x480)에서 횡단보도 정지선 찾기(10/19). 반환: (정지선 y(x=320 높이) 또는 None, 줄무늬 수).
+    정지선 = Hough 직선(길이 ≥ min_len, 기울기 |dy/dx| ≤ max_k) 중 차에 가장 가까운 것(y ≤ roi_bot, 아래는 보닛).
+    덩어리 대신 직선으로 찾아서 비스듬히 다가갈 때 정지선이 줄무늬·경계선과 붙어도 잡힘(bag_full_193634).
+    줄무늬 = 정지선과 평행하게 offsets(px)만큼 위를 가로로 훑어 흰 띠(폭 run_min~run_max)를 셈. 너비(최대/최소 ≤ reg_w)와
+    간격(≤ reg_g)이 대충 고른 띠가 z_need개 이상인 줄이 rows_need개 이상이고, 가장 많은 줄이 nz_need개 이상이면 횡단보도.
+    횡단보도 천이 찌그러져 있어 조건을 크게 풀었음(사용자). 장애물 칸(가로선 + 흰 차)은 줄무늬가 많아야 4개라 nz_need 5로 거름.
+    조명 차이를 없애려 밝기(L)에 top-hat(61x61)을 씌우고, 상위 0.5% 밝기의 th_rel배(최소 th_min)를 흰색으로"""
+    L = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)[..., 1]
+    th = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (61, 61)))
+    t = max(th_min, th_rel * float(np.percentile(th[roi_top:420], 99.5)))
+    mask = (th > t).astype(np.uint8) * 255
+    mask[:roi_top] = 0
+    mask[420:] = 0
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    lm = mask.copy()
+    lm[roi_bot:] = 0
+    segs = cv2.HoughLinesP(lm, 1, np.pi / 180, 80, minLineLength=min_len, maxLineGap=40)
+    best = None
+    if segs is not None:
+        for x1, y1, x2, y2 in segs[:, 0]:
+            if x2 == x1:
+                continue
+            k = (y2 - y1) / (x2 - x1)
+            if abs(k) > max_k:
+                continue
+            y320 = y1 + k * (320 - x1)
+            if best is None or y320 > best[0]:
+                best = (y320, k, x1, y1)
+    if best is None:
+        return None, 0
+    y320, k, x1, y1 = best
+    xs = np.arange(0, 640)
+    nz, n_ok = 0, 0
+    for o in offsets:
+        ys = np.round(y1 + k * (xs - x1) - o).astype(int)
+        ok = (ys >= roi_top) & (ys < 480)
+        if ok.sum() < 200:
+            continue
+        row = np.zeros(640, np.int8)
+        row[ok] = mask[ys[ok], xs[ok]] > 0
+        d = np.diff(np.concatenate([[0], row, [0]]))
+        st, en = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+        w = en - st
+        sel = (w >= run_min) & (w <= run_max)
+        ws, cs = w[sel], ((st + en) / 2)[sel]
+        if len(ws) >= 3:
+            gaps = np.diff(cs)
+            if ws.max() <= reg_w * ws.min() and gaps.max() <= reg_g * gaps.min():
+                nz = max(nz, len(ws))
+                n_ok += len(ws) >= z_need
+    return (float(y320) if n_ok >= rows_need and nz >= nz_need else None), nz
+
+
+# 방식 3 선 추적 상태: 쪽별 마지막 선 (y_eval 위치 x, 기울기 k, 몇 프레임 전에 봤는지)
+_v3_track = {}
+
+
+def lane_detect_v3(image, guide_x, guide_vp, a_rad, b_rad, l_min, s_max, open_k, roi_top=40, roi_bot=320,
+                   y_eval=300, lane_width=459.0, vp_y=-137.0, min_area=120, min_elong=3.0,
+                   k_min=0.25, k_max=2.0, l_rel=0.6, l_floor=60, max_jump=80.0, max_jump_cold=200.0, join_px=40.0, join_k=0.3,
+                   track_frames=15, steer_max=0.4, sides='LR', max_thick=45.0, fit_top=None, y_look=None,
+                   chain_px=40.0, chain_gap=150.0, chain_k=1.2, curve_span=150.0, y_look_curve=None, single_k_max=9.0,
+                   min_bottom=None, a_rad_curve=None):
+    """정면 카메라(10/19~)용: 왼쪽 선과 오른쪽 선을 따로 찾아 차로 중앙 위치와 소실점으로 조향.
+    선은 x = k·y + b 로 맞춤(k = dx/dy). 화면에서 왼쪽 선은 아래로 갈수록 왼쪽(k<0), 오른쪽 선은 오른쪽(k>0).
+    흰 덩어리 중 길쭉하고(min_elong) 기울기가 적당한(k_min~k_max: 가로선·보닛 위 세로 모서리·납작한 구석 제외) 것이 후보.
+    쪽마다 직전 프레임 선 위치(없으면 기준 위치 guide_x ∓ lane_width/2)에 가장 가까운 후보 하나를 고르고(추적 중 max_jump,
+    처음·놓친 뒤엔 max_jump_cold 안: 커브에서는 선이 직선 기준 위치보다 140px쯤 안쪽에 있음),
+    그 선과 한 줄에 있는 토막(점선, join_px·join_k 안)만 묶어 맞춤 — 옆 차로 선이 섞이지 않게(10/19 1차 주행: 왼쪽 위에
+    들어온 1차선 바깥 선이 점선과 섞여 중앙을 오른쪽으로 잘못 잡고 왼쪽으로 꺾어 점선을 넘음).
+    조향(+ = 오른쪽) = b_rad × (y_eval 위치 차로 중앙 − guide_x) + a_rad × (소실점 x − guide_vp).
+    직선 도로에서 차로 선은 모두 소실점(높이 vp_y)을 지나므로, 차가 옆으로 밀리면 중앙만 움직이고 소실점은 그대로,
+    차가 돌아가면 소실점이 움직임. 한쪽만 보이면 그 선의 vp_y 높이 x를 소실점으로, 차로 폭으로 중앙을 추정.
+    (예전 '중앙선 기울기' 오차는 옆으로 밀리기만 해도 원근 때문에 기울어 보여 위치 오차를 상쇄했음)
+    기준값(10/19, 2차선 직선 중앙에 세운 차, 640x480): 왼쪽 x=60 k=-0.54, 오른쪽 x=519 k=+0.51 → 중앙 289, 소실점 (296, -137)
+    sides='R'이면 오른쪽 선(2차선 실선)만 따라감(10/19 사용자 결정: 점선 쪽에서 옆 차로 선·트랙 밖 흰 차를 잡는 문제).
+    1차선은 lane_trace가 영상을 좌우 반전해 왼쪽 실선이 오른쪽에 오게 해서 같은 값으로 따라감.
+    굵기(max_thick, px)보다 두꺼운 덩어리(흰 차 차체 등)는 선이 아님.
+    sides='R+'면 오른쪽(실선)을 우선 따라가고, 실선이 안 보일 때만 왼쪽(점선) 위치 + 차로 폭/2로 중앙을 잡음(10/19 회피 5차:
+    1차선 왼쪽 커브에서 안쪽 실선이 화면 밖으로 빠져 선을 놓치고 오른쪽 조향을 유지함).
+    y_look을 주면 소실점 대신 화면 안 앞쪽 높이(y_look)의 차로 중앙으로 방향을 봄(10/19 커브 시험: 휜 실선을 직선으로 맞춰
+    화면 위 밖 소실점까지 늘리면 커브 앞에서 218px 왼쪽으로 과장돼 출발하자마자 최대로 꺾고 점선을 넘음).
+    조향 = b × (y_eval 중앙 − guide_x) + a × (y_look 중앙 − 기준 중앙선의 y_look 위치).
+    fit_top을 주면 그보다 아래(가까운) 점만으로 선을 맞춤 — 먼 곳의 휨이 섞이지 않게.
+    커브: 고른 선 위쪽으로 이어지는 토막을 차례로 잇고(마지막 토막 방향으로 늘린 위치에서 chain_px 안, 세로 간격
+    chain_gap 안, 기울기 차 chain_k 안), 이은 선이 세로 curve_span px 넘게 걸치면 2차식으로 맞춰 y_look 중앙을 계산.
+    (10/19 회피 6차: 1차선 왼쪽 커브에서 가까운 점선 토막 하나만 직선으로 맞춰 휘는 정도를 몰라 왼쪽 4~10°뿐)"""
+    overlay = image.copy()
+    # 흰 선 밝기 기준을 화면에 맞춰 정함: 바닥(중앙값) + l_rel × (상위 1% − 바닥). usb_cam 영상은 밝기 50으로 설정돼
+    # 어둡고(바닥 14, 선 121~130) 조명에 따라 크게 바뀌어 고정 l_min으로는 놓침(10/19). 선이 없을 때 너무 내려가지 않게 l_floor.
+    # l_rel <= 0이면 예전처럼 고정 l_min
+    if l_rel > 0:
+        L = cv2.cvtColor(image[roi_top:roi_bot], cv2.COLOR_BGR2HLS)[..., 1]
+        med, top = np.median(L), np.percentile(L, 99)
+        l_min = int(max(l_floor, med + l_rel * (top - med)))
+    mask = remove_thin(color_filter(image, l_min, s_max), open_k)
+    mask[:roi_top, :] = 0
+    mask[roi_bot:, :] = 0
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask)
+    dt = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    cands = {'L': [], 'R': []}
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] < min_area:
+            continue
+        ys, xs = np.nonzero(lab == i)
+        if np.ptp(ys) < 10:
+            continue
+        (_, _), (w, h), _ = cv2.minAreaRect(np.column_stack([xs, ys]).astype(np.float32))
+        if max(w, h) < min_elong * max(1.0, min(w, h)):
+            continue
+        k, b = np.polyfit(ys, xs, 1)
+        if not (k_min <= abs(k) <= k_max):
+            continue
+        d = dt[ys, xs]
+        if 2.0 * float(np.median(d[d >= np.percentile(d, 80)])) > max_thick:
+            continue
+        cands['L' if k < 0 else 'R'].append(dict(xs=xs, ys=ys, k=float(k), x=float(k * y_eval + b),
+                                                  ym=float(np.mean(ys)), xm=float(np.mean(xs))))
+    fits = {}
+    quads = {}
+    for s, sign, col in (('L', -1, (255, 0, 0)), ('R', 1, (0, 0, 255))):
+        if s not in sides and not (sides == 'R+' and s == 'L'):
+            continue
+        tr = _v3_track.get(s)
+        tracked = tr is not None and tr[2] < track_frames
+        expect = tr[0] if tracked else guide_x + sign * lane_width / 2.0
+        if tr is not None:
+            _v3_track[s] = (tr[0], tr[1], tr[2] + 1) + tuple(tr[3:])
+        if tracked and len(tr) > 3:
+            # 추적 중: 후보가 실제로 있는 높이에서 직전 선(늘린 선)과의 거리로 비교. 위쪽일수록 커브로 더 벗어나므로 넓게 허용
+            # (10/19 회피 6차: 커브에서 가까운 점선 토막이 지나간 뒤 위쪽 토막을 y=300까지 곧게 늘려 비교해 버리고 선을 놓침)
+            dist = lambda c: abs(c['xm'] - (tr[1] * c['ym'] + tr[3]))
+            near = [c for c in cands[s] if dist(c) < max_jump + 0.5 * max(0.0, y_eval - c['ym'])]
+        else:
+            dist = lambda c: abs(c['x'] - expect)
+            near = [c for c in cands[s] if dist(c) < (max_jump if tracked else max_jump_cold)]
+        for c in cands[s]:
+            overlay[c['ys'], c['xs']] = (128, 128, 128)
+        if not near:
+            continue
+        seed = min(near, key=dist)
+        group = [c for c in cands[s] if abs(c['x'] - seed['x']) < join_px and abs(c['k'] - seed['k']) < join_k]
+        # 위쪽으로 이어지는 토막 잇기(커브)
+        chain = list(group)
+        while True:
+            top = min(chain, key=lambda c: c['ys'].min())
+            ty = float(top['ys'].min()); tb = float(np.mean(top['xs'] - top['k'] * top['ys']))
+            nxt = None
+            for c in cands[s]:
+                if any(c is g for g in chain):
+                    continue
+                by = float(c['ys'].max())
+                if not (ty - chain_gap < by < ty + 10) or abs(c['k'] - top['k']) > chain_k:
+                    continue
+                bx = float(np.mean(c['xs'][c['ys'] >= by - 3]))
+                d = abs(bx - (top['k'] * by + tb))
+                # 커브에서는 곧게 늘린 위치에서 멀어질수록 더 벗어나므로 세로 간격에 비례해 허용
+                if d < chain_px + 0.5 * max(0.0, ty - by) and (nxt is None or d < nxt[0]):
+                    nxt = (d, c)
+            if nxt is None:
+                break
+            chain.append(nxt[1])
+        cx_all = np.concatenate([c['xs'] for c in chain]); cy_all = np.concatenate([c['ys'] for c in chain])
+        last_metrics['chain_' + s] = (len(group), len(chain), int(np.ptp(cy_all)))
+        if y_look is not None and np.ptp(cy_all) >= curve_span:
+            quads[s] = np.polyfit(cy_all, cx_all, 2)
+            overlay[cy_all, cx_all] = (0, 165, 255)
+            qy = np.arange(int(cy_all.min()), int(cy_all.max()), 4)
+            cv2.polylines(overlay, [np.column_stack([np.polyval(quads[s], qy), qy]).astype(np.int32).reshape(-1, 1, 2)],
+                          False, (255, 0, 255), 2)
+        xs = np.concatenate([c['xs'] for c in group]); ys = np.concatenate([c['ys'] for c in group])
+        # 화면 위쪽 짧은 조각만 보이면(아래로 min_bottom px까지 안 내려옴, 커브로 길게 이어진 것도 아님) 안 씀 → 놓친 것.
+        # 10/19 bag_full_195517 110.7초: 마지막 커브에서 실선이 옆 회색 띠와 붙어 굵기로 빠지고 먼 쪽 조각(y 60~90)만 남아
+        # 곧게 늘리니 중앙이 오른쪽으로 크게 벗어나 오른쪽 최대로 0.3초 꺾음
+        if min_bottom is not None and ys.max() < min_bottom and np.ptp(cy_all) < curve_span:
+            quads.pop(s, None)
+            continue
+        if fit_top is not None and np.sum(ys >= fit_top) >= 20:
+            xs, ys = xs[ys >= fit_top], ys[ys >= fit_top]
+        k, b = np.polyfit(ys, xs, 1)
+        fits[s] = (float(k), float(b))
+        last_metrics['k_' + s] = float(k)
+        _v3_track[s] = (float(k * y_eval + b), float(k), 0, float(b))
+        overlay[ys, xs] = col
+        cv2.line(overlay, (int(b + k * roi_top), roi_top), (int(b + k * roi_bot), roi_bot), (0, 255, 255), 2)
+    cv2.line(overlay, (0, roi_bot), (image.shape[1], roi_bot), (0, 255, 0), 1)
+    if sides == 'R+' and 'R' in fits and 'L' in fits:
+        del fits['L']  # 실선이 보이면 실선만 씀(점선 쪽은 추적만 이어감)
+    # 한쪽 선만으로 중앙을 추정할 때 기울기가 너무 크면(차 머리가 크게 돌아간 상태) 추정이 틀어지므로 안 씀 → 놓친 것으로 처리.
+    # 정상: 직선 ±0.5, 커브 오른쪽 1.24까지. 10/19 회피 9차 넘김 직후 왼쪽 실선 -1.34~-1.58을 중앙이 왼쪽이라 잘못 읽고
+    # 실선 쪽 최대 조향, 오른쪽 후보는 장애물 차 옆선(+1.51)
+    if len(fits) == 1 and abs(next(iter(fits.values()))[0]) > single_k_max:
+        fits = {}
+    if not fits:
+        last_metrics.clear()
+        last_metrics['l_min'] = l_min
+        return overlay, mask, None
+    at = lambda f, y: f[0] * y + f[1]
+    if 'L' in fits and 'R' in fits:
+        x_c = (at(fits['L'], y_eval) + at(fits['R'], y_eval)) / 2.0
+        kl, bl = fits['L']; kr, br = fits['R']
+        y_vp = (br - bl) / (kl - kr) if abs(kl - kr) > 1e-3 else vp_y
+        x_vp = kl * y_vp + bl
+    elif 'L' in fits:
+        x_c = at(fits['L'], y_eval) + lane_width / 2.0
+        x_vp = at(fits['L'], vp_y)
+    else:
+        x_c = at(fits['R'], y_eval) - lane_width / 2.0
+        x_vp = at(fits['R'], vp_y)
+    cv2.circle(overlay, (int(x_c), y_eval), 6, (0, 255, 0), -1)
+    cv2.circle(overlay, (int(guide_x), y_eval), 6, (255, 255, 255), 2)
+    # 소실점은 화면 위 밖에 있으므로 맨 위에 x만 표시
+    cv2.line(overlay, (int(x_vp), 0), (int(x_vp), 12), (0, 255, 0), 3)
+    cv2.line(overlay, (int(guide_vp), 0), (int(guide_vp), 12), (255, 255, 255), 1)
+    # obs_evade 정면 복귀 판단용 /lane_slope: 오른쪽 선 각도(rad, 양수). 오른쪽이 안 보이면 왼쪽 선을 좌우 반전한 값
+    k_side = fits['R'][0] if 'R' in fits else -fits['L'][0]
+    last_metrics.update({'slope_avg': float(np.arctan2(1.0, k_side)), 'x_value': float(x_c), 'x_vp': float(x_vp),
+                         'sides': ''.join(sorted(fits)), 'l_min': l_min})
+    # +rad = 오른쪽: 중앙이 기준보다 오른쪽(차가 왼쪽으로 밀림) / 소실점이 오른쪽(차가 왼쪽을 봄)이면 오른쪽으로
+    if y_look is None:
+        steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_vp - guide_vp)
+    else:
+        # y_look 높이의 차로 중앙: 양쪽이면 평균, 한쪽이면 원근에 맞춘 반폭(소실점에서 0, y_eval에서 lane_width/2)만큼 안쪽
+        # 곡선으로 맞춘 쪽만 쓰면 더 먼 높이(y_look_curve)를 봄: y=200에서는 커브가 덜 휘어 보여 조향이 작음
+        use_q = ('R' in fits and 'R' in quads and 'L' not in fits) or ('L' in fits and 'L' in quads and 'R' not in fits)
+        if use_q and y_look_curve is not None:
+            y_look = y_look_curve
+            # 커브(곡선으로 맞춤)에서는 먼 쪽 가중치를 따로: y_eval(300)도 차보다 앞이라 휜 실선에 맞추면 차 자체는 안쪽에
+            # 있게 되는데, 먼 쪽 항이 조향 대부분(0.22~0.28 rad)을 내 차가 그 자리에 머묾 → 줄이면 바깥(실선 쪽)으로(10/19)
+            if a_rad_curve is not None:
+                a_rad = a_rad_curve
+        half = lane_width / 2.0 * (y_look - vp_y) / (y_eval - vp_y)
+        if 'L' in fits and 'R' in fits:
+            x_look = (at(fits['L'], y_look) + at(fits['R'], y_look)) / 2.0
+        elif 'L' in fits:
+            x_look = (np.polyval(quads['L'], y_look) if 'L' in quads else at(fits['L'], y_look)) + half
+        else:
+            x_look = (np.polyval(quads['R'], y_look) if 'R' in quads else at(fits['R'], y_look)) - half
+        # 기준 중앙선: (guide_x, y_eval)과 (guide_vp, vp_y)를 잇는 선
+        x_look0 = guide_x + (guide_vp - guide_x) * (y_eval - y_look) / (y_eval - vp_y)
+        last_metrics['x_look'] = float(x_look)
+        cv2.circle(overlay, (int(x_look), int(y_look)), 6, (0, 255, 0), -1)
+        cv2.circle(overlay, (int(x_look0), int(y_look)), 6, (255, 255, 255), 2)
+        steering_rad = b_rad * (x_c - guide_x) + a_rad * (x_look - x_look0)
+    return overlay, mask, float(np.clip(steering_rad, -steer_max, steer_max))
+
+
 def lane_detect(image, guide_x=550, guide_slope=1.11, a_rad=0.5, b_rad=0.0027,
                 min_slope=0.4, right1=330, right2=640, roi_top=220, l_min=100, s_max=255, open_k=1, max_blob=0,
                 detector=1, **v2):
     """한 프레임을 받아 조향각(rad)을 계산하는 메인 함수. 선을 못 찾으면 steer=None 반환.
-    detector==2면 모양 기반 방식(lane_detect_v2)으로 넘기고, 기본(1)은 아래의 기존 방식(HLS → Canny → HoughLinesP)을 씀.
+    detector==2면 모양 기반 방식(lane_detect_v2), ==3이면 정면 카메라용 좌우 선 검출(lane_detect_v3)으로 넘기고,
+    기본(1)은 아래의 기존 방식(HLS → Canny → HoughLinesP)을 씀.
     반환값: (디버그용 오버레이 이미지, 흰색 마스크, 조향각 rad 또는 None)"""
+    if detector == 3:
+        return lane_detect_v3(image, guide_x, guide_slope, a_rad, b_rad, l_min, s_max, open_k, **v2)
     if detector == 2:
         return lane_detect_v2(image, guide_x, guide_slope, a_rad, b_rad, min_slope, roi_top, l_min, s_max,
                               open_k, max_blob, **v2)
@@ -312,6 +589,10 @@ class LaneMaskingNode(Node):
         # 따라갈 선(점선)이 오른쪽에 있으므로 기본은 끔
         self.declare_parameter('flip_on_lane_change', False)
         self.flip_on_lane_change = bool(self.get_parameter('flip_on_lane_change').value)
+        # True면 목표 차선이 1차선인 동안(1차선 주행 + 2→1 변경 중, lane_change_flag=True) 항상 반전 — 정면 카메라(10/19~):
+        # 2→1 변경 중에도 반전해 1차선 왼쪽 실선을 찾고, 1→2(반전 없음)는 그 좌우 대칭이 됨. lane_mirror는 반전에 안 씀
+        self.declare_parameter('flip_target', False)
+        self.flip_target = bool(self.get_parameter('flip_target').value)
         # 인식 구역 오른쪽 경계(px). 1차선에서는 점선 오른쪽의 주차 구역 선이 같이 잡히므로 좁힘(10/16: 440)
         self.declare_parameter('right2', 640, ParameterDescriptor(dynamic_typing=True))
         self.right2 = int(self.get_parameter('right2').value)
@@ -399,11 +680,40 @@ class LaneMaskingNode(Node):
         self.a_rad_l1 = float(self.get_parameter('a_rad_l1').value)
         self.b_rad_l1 = float(self.get_parameter('b_rad_l1').value)
 
+        # 방식 3(detector=3, 정면 카메라 좌우 선 검출, 10/19) 값. 기준값은 2차선 직선 중앙에 세운 차에서 잰 것.
+        # guide_vp_v3 = 소실점 x(px), vp_y_v3 = 소실점 높이(px, 화면 위 밖이라 음수), a_rad_v3 = 소실점 오차(px) 가중치,
+        # b_rad_v3 = 중앙 위치 오차(px) 가중치
+        dp = lambda n, v: self.declare_parameter(n, v, ParameterDescriptor(dynamic_typing=True))
+        for n, v in (('guide_x_v3', 289.0), ('guide_vp_v3', 296.0), ('a_rad_v3', 0.003), ('b_rad_v3', 0.004),
+                     ('open_k_v3', 7), ('roi_top_v3', 40), ('roi_bot_v3', 320), ('y_eval_v3', 300),
+                     ('lane_width_v3', 459.0), ('vp_y_v3', -137.0),
+                     ('l_rel_v3', 0.6), ('l_floor_v3', 60), ('steer_max_v3', 0.4), ('sides_v3', 'LR'),
+                     ('k_min_v3', 0.25), ('max_thick_v3', 45.0), ('fit_top_v3', -1), ('y_look_v3', -1),
+                     ('guide_x_v3_l1', -1.0), ('guide_vp_v3_l1', -1.0), ('ki_v3', 0.0), ('int_max_v3', 0.12),
+                     ('track_frames_v3', 15), ('y_look_curve_v3', -1), ('int_gate_v3', 1.0), ('single_k_max_v3', 9.0),
+                     ('min_bottom_v3', -1), ('a_rad_curve_v3', -1.0)):
+            dp(n, v)
+        self.v3 = {n: self.get_parameter(n).value for n in ('guide_x_v3', 'guide_vp_v3', 'a_rad_v3', 'b_rad_v3',
+                   'open_k_v3', 'roi_top_v3', 'roi_bot_v3', 'y_eval_v3', 'lane_width_v3', 'vp_y_v3',
+                   'l_rel_v3', 'l_floor_v3', 'steer_max_v3', 'sides_v3', 'k_min_v3', 'max_thick_v3',
+                   'fit_top_v3', 'y_look_v3', 'guide_x_v3_l1', 'guide_vp_v3_l1', 'ki_v3', 'int_max_v3', 'track_frames_v3',
+                   'y_look_curve_v3', 'int_gate_v3', 'single_k_max_v3', 'min_bottom_v3', 'a_rad_curve_v3')}
+        # 방식 3 적분 보정: 차가 한쪽으로 끌려(10/19: 2차선·1차선 모두 계속 오른쪽 보정이 필요) 목표보다 실선 쪽에서
+        # 균형을 잡는 것을 없앰. 중앙 위치 오차(px) × ki_v3 × 시간(초)을 쌓아 조향에 더함(±int_max_v3 rad)
+        self.v3_int = 0.0
+        self.v3_int_t = None
+        # 자동(AUTO=1) 모드에서만 적분을 쌓음: 서 있는 동안 쌓이면 출발하자마자 한쪽으로 꺾음(10/19)
+        self.drive_mode = None
+        self.mode_sub = self.create_subscription(UInt8, '/drive_mode', self._mode_cb, 10)
+
         # Subscriber & Publisher
         self.img_sub = self.create_subscription(
             Image, '/cam_lane/image_raw', self.image_callback, qos_profile_sensor_data)
         self.lane_change_sub = self.create_subscription(Bool, '/lane_change_flag', self.lane_change_callback, 10)
         self.lane_changing_sub = self.create_subscription(Bool, '/lane_changing', self.lane_changing_callback, 10)
+        # obs_evade가 1→2 변경을 2→1의 좌우 반전으로 할 때 True: 영상·조향을 반전하고 2→1 변경 때의 조건을 씀(10/19)
+        self.lane_mirror_sub = self.create_subscription(Bool, '/lane_mirror', self.lane_mirror_callback, 10)
+        self.lane_mirror = False
         self.cmd_pub = self.create_publisher(Twist, '/cmd_lane', 10)
         # 이번 프레임에서 선을 찾았는지 (obs_evade가 차선 변경 완료를 판단하는 데 씀)
         self.detected_pub = self.create_publisher(Bool, '/lane_detected', 10)
@@ -411,6 +721,10 @@ class LaneMaskingNode(Node):
         self.slope_pub = self.create_publisher(Float32, '/lane_slope', 10)
         # 가장 긴 선의 길이(px). obs_evade가 출발 차선 자동 판단에 씀(실선 = 길다 → 2차선, 점선 = 짧다 → 1차선)
         self.line_len_pub = self.create_publisher(Float32, '/lane_line_len', 10)
+        # 반전 안 한 원본 화면의 흰 선 후보 [x(y=300), 기울기 dx/dy, 길이]×n. obs_evade vision 차선 변경용(10/19)
+        self.lines_pub = self.create_publisher(Float32MultiArray, '/lane_lines', 10)
+        # 횡단보도 정지선 y(640x480 화면, x=320 높이). 없으면 -1. decision_auto가 신호등 정지 위치로 씀(10/19)
+        self.stop_line_pub = self.create_publisher(Float32, '/stop_line_y', 10)
         
         self.lane_change_flag = 0
         self.last_steer_rad = 0.0  # 이전 조향값 저장용 변수 추가
@@ -421,6 +735,15 @@ class LaneMaskingNode(Node):
             # 안 버리면 최근 1초 검출률이 기준 아래라 넘겨받자마자 0.3초쯤 멈춤(10/17 18차)
             self.detect_hist = []
         self.lane_changing = bool(msg.data)
+
+    def _mode_cb(self, msg):
+        self.drive_mode = int(msg.data)
+
+    def lane_mirror_callback(self, msg):
+        if bool(msg.data) != self.lane_mirror:
+            self.get_logger().info(f'lane_mirror -> {msg.data}')
+            self.steer_hist = []  # 반전 전후 조향은 부호가 반대라 섞이면 안 됨
+        self.lane_mirror = bool(msg.data)
 
     def lane_change_callback(self, msg):
         if msg.data != self.lane_change_flag:
@@ -437,9 +760,24 @@ class LaneMaskingNode(Node):
         # 카메라를 320x240으로 받을 수 있게 하고, 여기서 640x480으로 늘려 기존 로직을 그대로 쓴다.
         if image.shape[1] != 640 or image.shape[0] != 480:
             image = cv2.resize(image, (640, 480), interpolation=cv2.INTER_LINEAR)
+        if self.lane_changing:
+            self.lines_pub.publish(Float32MultiArray(data=line_features(image, self.s_max)))
+        sl_y, _ = crosswalk_detect(image)
+        self.stop_line_pub.publish(Float32(data=-1.0 if sl_y is None else sl_y))
 
-        in_lane1 = self.lane_change_flag is True
-        flip = in_lane1 and self.flip_on_lane_change
+        # 반전 중(1→2 변경)에는 뒤집힌 영상이 2→1 변경과 같아 보이므로 1차선 쪽 조건(2→1 변경 값)을 씀
+        in_lane1 = self.lane_change_flag is True or self.lane_mirror
+        # 1차선 주행 반전(flip_on_lane_change)은 차선 변경 중에는 안 함: 2→1 변경은 반전 없이, 1→2는 lane_mirror로 반전해야
+        # 두 변경이 서로 좌우 대칭이 됨(10/19)
+        if self.flip_target:
+            flip = self.lane_change_flag is True and self.flip_on_lane_change
+        else:
+            flip = (self.lane_change_flag is True and self.flip_on_lane_change and not self.lane_changing) or self.lane_mirror
+        if flip != getattr(self, '_last_flip', False):
+            _v3_track.clear()  # 반전 전후로 선 위치가 좌우로 바뀌므로 추적 초기화
+            self.steer_hist = []
+            self.v3_int = 0.0
+        self._last_flip = flip
         if flip:
             image = cv2.flip(image, 1) # 이미지 반전
         if self.lane_changing:
@@ -461,14 +799,56 @@ class LaneMaskingNode(Node):
             if min_slope_c >= 0.0:
                 min_slope = min_slope_c
 
-        result_img, mask_img, steer_rad = lane_detect(image, guide_x, guide_slope,
-                                                       a_rad=self.a_rad_l1 if in_lane1 else self.a_rad,
-                                                       b_rad=self.b_rad_l1 if in_lane1 else self.b_rad,
-                                                       min_slope=min_slope, right1=self.right1, right2=right2,
-                                                       roi_top=roi_top,
-                                                       l_min=self.l_min, s_max=self.s_max, open_k=self.open_k,
-                                                       max_blob=self.max_blob_l1 if in_lane1 else self.max_blob,
-                                                       detector=detector)
+        if detector == 3:
+            v3 = self.v3
+            # 1차선 기준값(lane_change_flag=True). 반전하면 카메라 비켜 달림 때문에 따로 줘야 하고(10/19 회피 3차),
+            # 반전 없이 점선을 따라갈 때도 2차선(실선 쪽 30px)과 목표가 다름. 음수면 2차선 값 그대로
+            gx, gvp = float(v3['guide_x_v3']), float(v3['guide_vp_v3'])
+            if self.lane_change_flag is True and float(v3['guide_x_v3_l1']) >= 0:
+                gx = float(v3['guide_x_v3_l1'])
+            if self.lane_change_flag is True and float(v3['guide_vp_v3_l1']) >= 0:
+                gvp = float(v3['guide_vp_v3_l1'])
+            # 차선 변경 중에는 대신 따라갈 선(R+의 L)을 안 씀: obs_evade가 '원래 선 사라짐 → 새 선 잡힘'을 /lane_detected로 봄
+            sides_eff = 'R' if (self.lane_changing and str(v3['sides_v3']) == 'R+') else str(v3['sides_v3'])
+            result_img, mask_img, steer_rad = lane_detect(
+                image, gx, gvp, a_rad=float(v3['a_rad_v3']),
+                b_rad=float(v3['b_rad_v3']), l_min=self.l_min, s_max=self.s_max, open_k=int(v3['open_k_v3']),
+                detector=3, roi_top=int(v3['roi_top_v3']), roi_bot=int(v3['roi_bot_v3']), y_eval=int(v3['y_eval_v3']),
+                lane_width=float(v3['lane_width_v3']), vp_y=float(v3['vp_y_v3']),
+                l_rel=float(v3['l_rel_v3']), l_floor=int(v3['l_floor_v3']), steer_max=float(v3['steer_max_v3']),
+                sides=sides_eff, k_min=float(v3['k_min_v3']), max_thick=float(v3['max_thick_v3']),
+                fit_top=int(v3['fit_top_v3']) if int(v3['fit_top_v3']) >= 0 else None,
+                y_look=int(v3['y_look_v3']) if int(v3['y_look_v3']) >= 0 else None,
+                track_frames=int(v3['track_frames_v3']),
+                y_look_curve=int(v3['y_look_curve_v3']) if int(v3['y_look_curve_v3']) >= 0 else None,
+                # 1차선에서만: 2차선 왼쪽 커브(장애물 지난 뒤)에서는 오른쪽 실선이 정상으로 1.47~1.7까지 누워
+                # 버려지면 차선을 놓쳐 멈춤(bag_obs_190819, 10/19)
+                single_k_max=float(v3['single_k_max_v3']) if in_lane1 else 9.0,
+                min_bottom=int(v3['min_bottom_v3']) if int(v3['min_bottom_v3']) >= 0 else None,
+                a_rad_curve=float(v3['a_rad_curve_v3']) if float(v3['a_rad_curve_v3']) >= 0 else None)
+            now_i = time.time()
+            ki = float(v3['ki_v3'])
+            if self.lane_changing or ki <= 0.0 or self.drive_mode != 1:
+                self.v3_int = 0.0  # 차선 변경 중(obs_evade가 조향)에는 쌓지 않음
+            elif steer_rad is not None and self.v3_int_t is not None and abs(steer_rad) < float(v3['int_gate_v3']):
+                # 조향이 작을 때(직선)만 쌓음: 커브 동안 쌓인 값이 커브가 끝난 뒤에도 남아 안쪽 실선에 붙음(10/19 회피 7차)
+                dt = min(0.2, now_i - self.v3_int_t)
+                lim = float(v3['int_max_v3'])
+                self.v3_int = float(np.clip(self.v3_int + ki * (last_metrics['x_value'] - gx) * dt, -lim, lim))
+            self.v3_int_t = now_i
+            if steer_rad is not None:
+                sm = float(v3['steer_max_v3'])
+                steer_rad = float(np.clip(steer_rad + self.v3_int, -sm, sm))
+        else:
+            result_img, mask_img, steer_rad = lane_detect(
+                image, guide_x, guide_slope,
+                a_rad=self.a_rad_l1 if in_lane1 else self.a_rad,
+                b_rad=self.b_rad_l1 if in_lane1 else self.b_rad,
+                min_slope=min_slope, right1=self.right1, right2=right2,
+                roi_top=roi_top,
+                l_min=self.l_min, s_max=self.s_max, open_k=self.open_k,
+                max_blob=self.max_blob_l1 if in_lane1 else self.max_blob,
+                detector=detector)
         
         # --- 수정된 로직 ---
         if steer_rad is not None:

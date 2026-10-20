@@ -8,6 +8,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Empty
+from rcl_interfaces.msg import SetParametersResult
 
 
 def clamp(x, lo, hi):
@@ -44,6 +45,8 @@ class SerialSender(Node):
         self.timeout = float(self.get_parameter('timeout_s').value)
         self.calib_lock_s = float(self.get_parameter('calib_lock_s').value)
         self.calib_cmd = str(self.get_parameter('calib_cmd').value)
+        # 속도(th_scale)는 노드를 다시 켜지 않고 ros2 param set으로 바로 바꿀 수 있게 함
+        self.add_on_set_parameters_callback(self.on_params)
 
         # USB가 순간적으로 끊겨도(허브 EMI 등) 노드가 죽지 않고 정지 상태로 대기하며 재연결한다
         self.reconnect_period_s = 1.0
@@ -61,6 +64,16 @@ class SerialSender(Node):
         self.sub_cmd = self.create_subscription(Twist, '/cmd_out', self.on_cmd, 10)
         self.sub_calib = self.create_subscription(Empty, '/calib/start', self.on_calib, 10)
         self.timer = self.create_timer(0.05, self.on_timer)
+
+    def on_params(self, params):
+        for p in params:
+            if p.name == 'th_scale':
+                v = int(p.value)
+                if not 0 <= v <= 1000:
+                    return SetParametersResult(successful=False, reason='th_scale은 0~1000')
+                self.th_scale = v
+                self.get_logger().info(f"th_scale = {v}")
+        return SetParametersResult(successful=True)
 
     def try_open(self):
         """시리얼 포트 열기 시도. 실패해도 예외를 던지지 않고 False만 반환 — on_timer가 주기적으로 재시도함"""

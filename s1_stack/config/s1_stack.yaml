@@ -27,7 +27,6 @@ serial_sender:
     th_scale: 1000
     stn_max: 1000
     stn_deadzone: 50
-    timeout_s: 0.3
     calib_lock_s: 6.0
     calib_cmd: 'CAL:START'
 

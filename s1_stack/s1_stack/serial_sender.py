@@ -29,8 +29,7 @@ class SerialSender(Node):
         self.declare_parameter('stn_max', 1000)
         self.declare_parameter('stn_deadzone', 50)
 
-        # timeout / calibration
-        self.declare_parameter('timeout_s', 0.3)  # 선언만 돼있고 아래 코드에서 실제로는 안 씀(참고용)
+        # calibration
         self.declare_parameter('calib_lock_s', 6.0)
         self.declare_parameter('calib_cmd', 'CAL:START')
 
@@ -42,7 +41,6 @@ class SerialSender(Node):
         self.stn_max = int(self.get_parameter('stn_max').value)
         self.stn_deadzone = int(self.get_parameter('stn_deadzone').value)
 
-        self.timeout = float(self.get_parameter('timeout_s').value)
         self.calib_lock_s = float(self.get_parameter('calib_lock_s').value)
         self.calib_cmd = str(self.get_parameter('calib_cmd').value)
         # 속도(th_scale)는 노드를 다시 켜지 않고 ros2 param set으로 바로 바꿀 수 있게 함

@@ -339,7 +339,11 @@ class ObstacleEvasionNode(Node):
                 self.side_clear_count = 0
             elif self.side_seen or not self.SIDE_REQUIRE_SEEN:
                 self.side_clear_count += 1
-        side_occupied = ((self.side_seen or not self.SIDE_REQUIRE_SEEN) and self.side_clear_count < self.SIDE_CLEAR_SCANS)
+        # 옆 구역은 return 모드에서만 셈. toggle에서는 side_clear_count가 0에 머물러, side_require_seen=false면
+        # 1차선 앞 장애물마다 "양쪽 막힘"으로 잘못 판단해 2차선으로 안 가고 그대로 들이받음(10/21 bag obs_165534)
+        side_occupied = (self.MODE == 'return'
+                         and (self.side_seen or not self.SIDE_REQUIRE_SEEN)
+                         and self.side_clear_count < self.SIDE_CLEAR_SCANS)
 
         # 전방 장애물: 2차선이든 1차선이든 감지되면 반대 차선으로 (두 모드 공통)
         # 차선 변경 직후 rearm_delay_s 동안은 쉼(방금 피한 장애물이 옆 차선 앞쪽에 보여 재감지되는 것 방지)

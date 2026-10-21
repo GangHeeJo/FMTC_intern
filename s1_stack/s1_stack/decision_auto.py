@@ -6,8 +6,8 @@
 #   /cmd_obs  (obs_evade)    ─┤
 #   /stop_line_y (lane_trace)─┘
 # 우선순위: stop_line_mode=True면 1) 정지선 정지(cw_stop) > 2) 장애물 회피 > 3) 차선 추종.
-# stop_line_mode=False(기본값)면 1) 장애물 회피 > 2) 신호등/횡단보도 정지 > 3) 차선 추종 — 이 경로는
-# 10/19 gyungyoon 브랜치가 갈라질 당시의 순서를 그대로 둔 것(2026-10-20: main 단독 수정은 되돌림).
+# stop_line_mode=False(기본값)면 1) 신호등(빨간·노란불) 정지 > 2) 장애물 회피 > 3) 차선 추종.
+# (2026-10-21: 신호등 바로 앞 장애물 코스에서 회피 중 빨간불에 안 서서 신호등을 회피보다 앞으로, /cross_stop은 안 씀)
 #
 # stop_line_mode (2026-10-19~, 기본 False): 신호등 정지를 "신호등 bbox 크기로 거리 추정" 대신
 # "상단 카메라가 본 횡단보도 정지선 위치(/stop_line_y)에 도달했는지"로 판단하는 대안 모드.
@@ -206,16 +206,18 @@ class MotionDecision(Node):
             msg.linear.x = 0.0
             self.get_logger().info('STOP SIGNAL ACTIVE (stop line)')
 
-        # [우선순위 1] 장애물 회피 명령 확인 (최근 0.2초 이내 수신된 경우만 유효)
+        # 신호등만 보는 모드(10/21): 빨간·노란불이면 장애물 회피 중이라도 정지. 신호등 바로 앞에 장애물이 있는 코스에서
+        # 빨간불이 보이는 동안 줄곧 차선 변경 중이라 회피가 우선해 안 섬(bag obs_171802). 횡단보도(/cross_stop)로는 안 섬 —
+        # 초록불이어도 횡단보도가 보이는 동안 계속 서 있게 됨
+        elif not self.stop_line_mode and self.stop_by_light:
+            msg.angular.z = self.current_lane_cmd.angular.z
+            msg.linear.x = 0.0
+            self.get_logger().info('STOP SIGNAL ACTIVE (light)', throttle_duration_sec=1.0)
+
+        # 장애물 회피 명령 확인 (최근 0.2초 이내 수신된 경우만 유효)
         elif (current_time - self.last_obs_time) < 0.2:
             msg = self.current_obs_cmd
             self.get_logger().info('PRIORITY: OBSTACLE EVASION ACTIVE')
-
-        # [우선순위 2] 정지 조건 확인 (신호등 OR 횡단보도). 정지선 모드는 위에서 처리
-        elif not self.stop_line_mode and (self.stop_by_light or self.stop_by_crosswalk):
-            msg.angular.z = self.current_lane_cmd.angular.z
-            msg.linear.x = 0.0
-            self.get_logger().info('STOP SIGNAL ACTIVE')
 
         # [우선순위 3] 일반 주행 (차선 인지)
         else:

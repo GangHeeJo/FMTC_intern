@@ -149,7 +149,8 @@ decision_auto:
     # 10/19 사용자: 빨간·노란불이면 횡단보도 정지선 앞에서 섬. 정지선은 상단 카메라(lane_trace /stop_line_y),
     # 신호등은 앞 카메라 sign_detect(/light_stop)만. 앞 카메라 YOLO 횡단보도(/cross_stop)는 안 씀
     require_signals: true
-    stop_line_mode: true
+    # 10/21: 신호등 앞에 정지선이 없는 코스 → 신호등(/light_stop)만 보고 섬. 빨간불이 장애물 회피보다 우선
+    stop_line_mode: false
     stop_line_y: 285.0        # 정지 위치 정지선 y 326~330(bag_cw_191703). 300이면 밀려 348에서 섬(bag_full_200907, 44px) → 285
     stop_line_near_y: 260.0   # 여기까지 내려온 뒤 사라지면 도착으로 봄
     cw_pass_s: 5.0

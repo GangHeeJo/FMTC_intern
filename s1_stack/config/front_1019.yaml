@@ -92,10 +92,14 @@ lane_masking_node:            # lane_trace 노드 이름
 obs_evade:
   ros__parameters:
     # 장애물을 만나면 2→1 회피 → 장애물 지나면 바로 1→2 복귀까지 한 과정(10/19 사용자)
+    # 10/21: 2차선이 주행 차선, 1차선은 추월 차선 → 장애물을 지나치면 1차선에 장애물이 없어도 2차선으로 복귀(return)
     mode: return
     # 1차선에서 오른쪽 구역(앞 2.0 m ~ 뒤 0.2 m, 오른쪽 0.2~1.0 m)이 5번 연속(약 0.5초) 비면 바로 복귀.
     # 옆에서 봤는지 상관없음(10초 대기 없앰). 앞쪽을 2.0 m까지 늘려 아직 오른쪽 앞에 있는 장애물도 기다림
-    side_require_seen: false
+    # 10/21: 옆에서 장애물을 본 뒤 비어야 복귀(false면 0.5초만 비어도 복귀해 아직 앞오른쪽에 있는 장애물 쪽으로 돌아갈 수 있음).
+    # 차선 변경 중(TO_LANE1)에 옆으로 지나친 것도 봤음으로 침. 끝내 못 보면 pass_timeout_s 뒤 복귀(3초는 추정치)
+    side_require_seen: true
+    pass_timeout_s: 3.0
     side_ahead: 2.0
     start_lane: 2             # 자동 판단(0)은 start_len_px가 오른쪽 카메라 기준이라 아직 못 씀
     change_speed: 0.7         # PWM 126 (10/19 결정: 변경도 빠르게)

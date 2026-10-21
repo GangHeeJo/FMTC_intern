@@ -207,6 +207,7 @@ class ObstacleEvasionNode(Node):
         self.cam_lost_count = 0
         self.cam_found_count = 0
         self.blocked = False         # 1차선 앞과 2차선 옆이 모두 막혀 정지 중
+        self.holding = False         # 양쪽 막힘으로 선 뒤 앞이나 옆이 빌 때까지 정지 유지 중
         self.straighten_start = None  # camera 변경: 정면 복귀 시작 시각(None이면 아직 꺾는 중)
         self.cross_start = None       # camera 변경: 새 선을 잡은 뒤 직진 시작 시각
         self.straighten_err0 = None   # 정면 복귀 시작 때의 기울기 오차 부호
@@ -257,8 +258,12 @@ class ObstacleEvasionNode(Node):
         self.state_start = time.time()
         self.change_step = -1
         self.obstacle_count = 0
-        self.side_seen = False
+        # 옆 장애물을 봤는지는 TO_LANE1 → LANE1 사이에 이어 감: 변경하는 동안 옆으로 지나친 장애물도 "봤음"으로 쳐야
+        # side_require_seen=true에서 pass_timeout까지 안 기다림(10/21). 빈 횟수는 LANE1에 들어와서 새로 셈
+        if state != LANE1:
+            self.side_seen = False
         self.side_clear_count = 0
+        self.holding = False
         self.cam_lost_seen = False
         self.cam_lost_count = 0
         self.cam_found_count = 0
@@ -337,7 +342,7 @@ class ObstacleEvasionNode(Node):
         y = ranges[valid_idx] * np.sin(angles[valid_idx])
         ahead, right = -x, y
 
-        if self.state == LANE1 and self.MODE == 'return':
+        if self.state in (TO_LANE1, LANE1) and self.MODE == 'return':
             side_idx = ((ahead < self.SIDE_AHEAD) & (ahead > -self.SIDE_BEHIND)
                         & (right > self.SIDE_LAT_MIN) & (right < self.SIDE_LAT_MAX))
             if np.sum(side_idx) >= self.SIDE_MIN_POINTS:
@@ -356,6 +361,18 @@ class ObstacleEvasionNode(Node):
         # 전방 장애물: 2차선이든 1차선이든 감지되면 반대 차선으로 (두 모드 공통)
         # 차선 변경 직후 rearm_delay_s 동안은 쉼(방금 피한 장애물이 옆 차선 앞쪽에 보여 재감지되는 것 방지)
         self.blocked = False
+        # "양쪽 막힘"으로 선 뒤에는 앞 장애물이 감지 구간(roi_near~roi_far)보다 가까워져도 계속 앞 장애물로 봄.
+        # 예전엔 구간을 벗어나는 순간 정지가 풀려 그대로 전진함(10/21). 앞이 비면 풀고, 옆이 비면 아래 복귀 조건이 2차선으로 보냄
+        if self.holding and self.state == LANE1:
+            front_idx = (ahead > 0.3) & (ahead < self.ROI_FAR) & (np.abs(right) < self.ROI_HALF_W)
+            if np.sum(front_idx) >= self.MIN_POINTS and side_occupied:
+                self.blocked = True
+                self.get_logger().error('Both lanes blocked -> holding', throttle_duration_sec=1.0)
+                return
+            self.holding = False
+            self.obstacle_count = 0
+            self.get_logger().warn(f'Hold released (front clear: {np.sum(front_idx) < self.MIN_POINTS})')
+
         # 모드를 모르면(cmd_mux는 바뀔 때만 알림) 감지 안 함: obs_run을 켠 뒤 A를 누르면 그때 알게 됨(10/19: 모드 모른 채
         # 차를 옮기는 동안 회피로 넘어감)
         if self.drive_mode != 1 or time.time() - self.cw_active_t < 0.5:
@@ -370,6 +387,7 @@ class ObstacleEvasionNode(Node):
                 if self.state == LANE1 and side_occupied:
                     # 앞(1차선)과 오른쪽 옆(2차선)이 모두 막힘 → 옆이 빌 때까지 정지
                     self.blocked = True
+                    self.holding = True
                     self.get_logger().error('Both lanes blocked -> holding', throttle_duration_sec=1.0)
                     return
                 self.get_logger().warn('Obstacle Detected!')

@@ -44,6 +44,11 @@ def generate_launch_description():
             executable='decision_auto',
             name='decision_auto',
             output='screen',
+            # 10/21: 예전엔 설정 없이 기본값(stop_line_mode 등)으로 떠서, front_1019.yaml로 따로 다시 띄우고
+            # launch 쪽은 pkill로 꺼야 했음(둘 다 /cmd_auto 발행). 지금 카메라 정면 장착 기준 설정을 바로 줌
+            parameters=[PathJoinSubstitution([
+                FindPackageShare('s1_stack'), 'config', 'front_1019.yaml'
+            ])],
         ),
         Node(
             package='sllidar_ros2',

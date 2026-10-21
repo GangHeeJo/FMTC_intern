@@ -194,6 +194,8 @@
 
 ## 6. 빌드하고 실행하는 방법
 
+**필요 환경**: Ubuntu 22.04 (jammy) + ROS2 humble. 실제 개발·테스트가 전부 이 조합(네이티브 설치, WSL2/VirtualBox 아님)에서 이루어졌고, FMTC 노트북도 Ubuntu 22.04 humble로 고정되어 있어 그대로 맞습니다. Ubuntu 24.04(noble)는 ROS2 jazzy용이라 버전이 다르므로 이 코드를 그 환경에 맞춰 바꿀 필요는 없습니다.
+
 ```bash
 # 이 폴더의 상위 폴더(colcon 워크스페이스 루트)에서
 colcon build --symlink-install

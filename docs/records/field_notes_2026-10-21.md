@@ -1,6 +1,7 @@
 # Field Notes — 2026-10-21 (FMTC 노트북 이전, 신호등만 보는 정지, return 회피 보강)
 
 > 한 장 요약은 [handoff_2026-10-21](../summary/handoff_2026-10-21.md). 전 기록은 [field_notes_2026-10-19](field_notes_2026-10-19.md).
+> 시간순 상세 작업 기록(무엇을 보고 어떻게 판단했나)은 [session_log_2026-10-21](session_log_2026-10-21.md), 분석 스크립트는 [scripts/bag_analysis](../../scripts/bag_analysis/README.md).
 
 반영 상태 표기: **커밋** = 이 문서와 함께 `main`에 커밋 / **임시** = 실행 중에만 유효 / **미해결**
 

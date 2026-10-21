@@ -53,6 +53,11 @@ class VisionPercept(Node):
         # 10/19 정지선 모드에서는 정지선이 거리를 맡으므로 낮춰도 됨(bag_full_193634: 96초 3924부터 빨강 0.88인데 15500 때문에 97.7초에야 인정)
         self.declare_parameter('min_bbox_size', 15500)
         self.min_bbox_size = int(self.get_parameter('min_bbox_size').value)
+        # 이미 빨간·노란불로 서 있는 동안은 기준을 이 비율로 낮춤(히스테리시스). 빨강→노랑으로 바뀔 때 노란불 박스가
+        # 조금 작게 잡혀(11800 → 9700) 기준 10000 밑으로 내려가 0.5초 정지가 풀려 앞으로 감(10/21 bag obs_172624)
+        self.declare_parameter('hold_bbox_ratio', 0.7)
+        self.hold_bbox_ratio = float(self.get_parameter('hold_bbox_ratio').value)
+        self.stop_tl_active = False
         self.bbox_center_bound = [0.1, 0.9]  # 횡단보도 박스 중심이 화면 가로 10~90% 안에 있어야 유효
 
         # Pub/Sub
@@ -103,7 +108,8 @@ class VisionPercept(Node):
             # 2. 신호등 판단 (Red: 2, Yellow: 3)
             elif cls in [2, 3] and conf > self.light_conf:
                 size = (coords[2] - coords[0]) * (coords[3] - coords[1])
-                if size >= self.min_bbox_size:
+                min_size = self.min_bbox_size * (self.hold_bbox_ratio if self.stop_tl_active else 1.0)
+                if size >= min_size:
                     current_tl_detected = True
 
         # 히스토리 업데이트 (최근 5프레임의 감지 여부만 기억)
@@ -117,6 +123,7 @@ class VisionPercept(Node):
         
         stop_tl = Bool()
         stop_tl.data = sum(self.tl_history) >= 3
+        self.stop_tl_active = stop_tl.data
 
         self.pub_cross.publish(stop_cw)
         self.pub_light.publish(stop_tl)

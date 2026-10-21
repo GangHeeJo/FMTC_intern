@@ -1,7 +1,9 @@
 joy_to_twist:
   ros__parameters:
-    axis_steer: 0
-    axis_drive: 3
+    # 10/21 FMTC 노트북 + Xbox 패드(xpad: 0 왼쪽 좌우, 1 왼쪽 위아래, 3 오른쪽 좌우, 4 오른쪽 위아래).
+    # 예전 값(조향 0, 속도 3)은 조향·속도가 서로 바뀌어 있었음 → 조향 = 오른쪽 스틱 좌우, 속도 = 왼쪽 스틱 위아래(위가 +)
+    axis_steer: 3
+    axis_drive: 1
     steer_deadzone: 0.15
     drive_threshold: 0.10
     stn_scale: 1000.0

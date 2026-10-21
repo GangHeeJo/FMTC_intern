@@ -234,6 +234,11 @@ class ObstacleEvasionNode(Node):
         # 시험 사이에 obs_evade가 LANE1로 넘어가 있어 lane_trace가 2차선에서 반전 영상으로 1차선 실선을 찾음)
         self.drive_mode = None
         self.mode_sub = self.create_subscription(UInt8, '/drive_mode', self.mode_callback, 10)
+        # decision_auto 최종 속도가 0이면(빨간불 정지 등) 차선 변경 단계 시계를 멈춤: 서 있는 동안 시간만 흘러
+        # 되꺾기 단계를 건너뛰고 lane_trace에 넘겨짐(10/21 bag obs_172126, 빨간불 5.5초 정지)
+        self.auto_lin, self.auto_t = None, 0.0
+        self.auto_sub = self.create_subscription(Twist, '/cmd_auto', self.auto_callback, 10)
+        self.last_loop_t = time.time()
 
         # 제어 루프 (10Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -286,6 +291,9 @@ class ObstacleEvasionNode(Node):
     def cw_callback(self, msg):
         if msg.data:
             self.cw_active_t = time.time()
+
+    def auto_callback(self, msg):
+        self.auto_lin, self.auto_t = float(msg.linear.x), time.time()
 
     def mode_callback(self, msg):
         self.drive_mode = int(msg.data)
@@ -395,8 +403,20 @@ class ObstacleEvasionNode(Node):
             return
 
         # 2. 차선 변경 중이면 경과 시간으로 현재 단계를 찾아 /cmd_obs 발행
+        now = time.time()
+        dt, self.last_loop_t = now - self.last_loop_t, now
         if self.state not in (TO_LANE1, TO_LANE2):
             return  # 평상시에는 /cmd_obs에 아무것도 publish하지 않음 → decision_auto가 /cmd_lane 사용
+
+        # 차가 서 있는 동안(최종 속도 0)은 단계 시작 시각을 그만큼 뒤로 밀어 경과 시간이 안 늘게 함
+        if self.auto_lin == 0.0 and now - self.auto_t < 0.3:
+            self.state_start += dt
+            self.vis_phase_t += dt
+            if self.straighten_start is not None:
+                self.straighten_start += dt
+            if self.cross_start is not None:
+                self.cross_start += dt
+            self.get_logger().info('Stopped by decision_auto -> lane change paused', throttle_duration_sec=1.0)
 
         sign = 1.0 if self.state == TO_LANE1 else -1.0  # 오른쪽 변경은 조향 부호 반대
         elapsed = time.time() - self.state_start
